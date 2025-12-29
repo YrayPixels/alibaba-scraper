@@ -1,5 +1,5 @@
 import puppeteer from "puppeteer-core";
-import { AlibabaScraper, AlibabaProduct } from "./alibaba-scraper";
+import { AlibabaScraper, AlibabaProduct } from "./alibaba-scraper.js";
 
 /**
  * Configuration for browser scraping
