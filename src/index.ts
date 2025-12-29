@@ -17,6 +17,12 @@ const PORT = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
+// Request logging middleware
+app.use((req, res, next) => {
+  console.log(`📥 ${req.method} ${req.path}`);
+  next();
+});
+
 // Root endpoint
 app.get("/", (req, res) => {
   res.json({
@@ -31,7 +37,12 @@ app.get("/", (req, res) => {
 
 // Health check endpoint
 app.get("/health", (req, res) => {
-  res.json({ status: "ok", service: "amazon-scraper-service" });
+  console.log("✅ Health check requested");
+  res.status(200).json({
+    status: "ok",
+    service: "amazon-scraper-service",
+    timestamp: new Date().toISOString(),
+  });
 });
 
 // Scrape product endpoint
