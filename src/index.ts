@@ -6,12 +6,28 @@ import { scrapeFromUrlWithBrowser } from "./scrapers/browser-scraper.js";
 
 dotenv.config();
 
+console.log("🔧 Starting application...");
+console.log("🔧 NODE_ENV:", process.env.NODE_ENV || "not set");
+console.log("🔧 PORT:", process.env.PORT || "not set (will use 3001)");
+
 const app = express();
 const PORT = process.env.PORT || 3001;
 
 // Middleware
 app.use(cors());
 app.use(express.json());
+
+// Root endpoint
+app.get("/", (req, res) => {
+  res.json({
+    status: "ok",
+    service: "amazon-scraper-service",
+    endpoints: {
+      health: "/health",
+      scrape: "/scrape (POST)",
+    },
+  });
+});
 
 // Health check endpoint
 app.get("/health", (req, res) => {
@@ -112,9 +128,30 @@ app.post("/scrape", async (req, res) => {
 });
 
 // Start server
-app.listen(Number(PORT), "0.0.0.0", () => {
+const server = app.listen(Number(PORT), "0.0.0.0", () => {
   console.log(`🚀 Scraper service running on port ${PORT}`);
   console.log(`📍 Health check: http://localhost:${PORT}/health`);
   console.log(`📍 Scrape endpoint: http://localhost:${PORT}/scrape`);
+});
+
+// Handle server errors
+server.on("error", (error: NodeJS.ErrnoException) => {
+  if (error.code === "EADDRINUSE") {
+    console.error(`❌ Port ${PORT} is already in use`);
+  } else {
+    console.error("❌ Server error:", error);
+  }
+  process.exit(1);
+});
+
+// Handle unhandled promise rejections
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("❌ Unhandled Rejection at:", promise, "reason:", reason);
+});
+
+// Handle uncaught exceptions
+process.on("uncaughtException", (error) => {
+  console.error("❌ Uncaught Exception:", error);
+  process.exit(1);
 });
 
