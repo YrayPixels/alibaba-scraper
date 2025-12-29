@@ -83,6 +83,7 @@ export async function scrapeWithBrowser(
     });
 
     // Block unnecessary resources to speed up loading
+    await page.setRequestInterception(true);
     page.on("request", (request) => {
       const resourceType = request.resourceType();
       // Block images, fonts, and some other resources to speed up
