@@ -1,0 +1,34 @@
+{
+  "name": "amazon-scraper-service",
+  "version": "1.0.0",
+  "description": "Express.js service for scraping Alibaba products",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "type-check": "tsc --noEmit"
+  },
+  "keywords": ["scraper", "alibaba", "express"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "cheerio": "^1.0.0",
+    "puppeteer-core": "^24.34.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/cors": "^2.8.17",
+    "@types/cheerio": "^0.22.35",
+    "@types/node": "^22.16.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.8.3"
+  }
+}
+
