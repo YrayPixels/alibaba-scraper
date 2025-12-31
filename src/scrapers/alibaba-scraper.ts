@@ -1,6 +1,16 @@
 import * as cheerio from 'cheerio';
 
 /**
+ * Interface for price tier (quantity-based pricing)
+ */
+export interface PriceTier {
+  minQuantity: number;
+  maxQuantity: number | null; // null means no upper limit
+  price: number;
+  currency: string;
+}
+
+/**
  * Interface for Alibaba product data
  */
 export interface AlibabaProduct {
@@ -10,6 +20,7 @@ export interface AlibabaProduct {
     max: number;
     currency: string;
   } | null;
+  priceTiers: PriceTier[]; // Quantity-based pricing tiers
   moq: string | null; // Minimum Order Quantity
   images: string[];
   mainImage: string | null;
@@ -40,7 +51,7 @@ export interface AlibabaProduct {
  */
 export class AlibabaScraper {
   private $: cheerio.CheerioAPI;
-  
+
   constructor(html: string) {
     this.$ = cheerio.load(html) as unknown as cheerio.CheerioAPI;
   }
@@ -50,91 +61,292 @@ export class AlibabaScraper {
    */
   private extractTitle(): string {
     const $ = this.$;
-    
+
     // Try multiple selectors for title
     const selectors = [
-      'h1[title]', // Modern Alibaba uses h1 with title attribute
+      "h1[title]", // Modern Alibaba uses h1 with title attribute
       'h1[data-pl="product-title"]',
-      'h1.product-title',
-      '.product-title h1',
+      "h1.product-title",
+      ".product-title h1",
       'h1[class*="title"]',
-      '.pdp-title h1',
+      ".pdp-title h1",
       '[class*="ProductTitle"]',
       '[class*="product-name"]',
-      '.detail-title',
-      '.module_title h1',
+      ".detail-title",
+      ".module_title h1",
       'meta[property="og:title"]',
-      'h1',
+      "h1",
     ];
 
     for (const selector of selectors) {
-      if (selector.startsWith('meta')) {
-        const title = $(selector).attr('content')?.trim();
+      if (selector.startsWith("meta")) {
+        const title = $(selector).attr("content")?.trim();
         if (title && title.length > 3) return title;
       } else {
         // Try getting title attribute first
-        const titleAttr = $(selector).first().attr('title');
+        const titleAttr = $(selector).first().attr("title");
         if (titleAttr && titleAttr.length > 3) return titleAttr;
-        
+
         // Then try text content
         const title = $(selector).first().text().trim();
         if (title && title.length > 3) return title;
       }
     }
 
-    return 'Unknown Product';
+    return "Unknown Product";
   }
 
   /**
-   * Extract product price information
+   * Extract product price information and quantity-based price tiers
    */
-  private extractPrice(): AlibabaProduct['price'] {
+  private extractPrice(): {
+    price: AlibabaProduct["price"];
+    priceTiers: PriceTier[];
+  } {
     const $ = this.$;
-    
-    try {
-      let prices: number[] = [];
-      let currency = 'USD';
+    const priceTiers: PriceTier[] = [];
+    let prices: number[] = [];
+    let currency = "USD";
 
-      // Modern Alibaba uses data-testid="product-price" or data-testid="ladder-price"
-      const priceContainer = $('[data-testid="product-price"], [data-testid="ladder-price"], .module_price');
-      
-      if (priceContainer.length > 0) {
-        // Look for price items in ladder pricing
-        const priceItems = priceContainer.find('.price-item, [class*="price"]');
-        
+    try {
+      // Modern Alibaba uses data-testid="ladder-price" for quantity-based pricing
+      const ladderContainer = $('[data-testid="ladder-price"]');
+
+      if (ladderContainer.length > 0) {
+        // Look for price-item elements within the ladder-price container
+        const priceItems = ladderContainer.find(".price-item");
+
         priceItems.each((_, el) => {
-          const text = $(el).text().trim();
-          
-          // Extract currency from text
-          if (text.includes('NGN') || text.includes('₦')) currency = 'NGN';
-          else if (text.includes('CNY') || text.includes('¥')) currency = 'CNY';
-          else if (text.includes('USD') || text.includes('US$')) currency = 'USD';
-          else if (text.includes('EUR') || text.includes('€')) currency = 'EUR';
-          else if (text.includes('GBP') || text.includes('£')) currency = 'GBP';
-          
-          // Extract numbers (handle formats like "NGN 2,478" or "2,478")
-          const numbers = text.match(/[\d,]+\.?\d*/g);
-          if (numbers) {
-            numbers.forEach(num => {
-              const price = parseFloat(num.replace(/,/g, '').replace(/\s/g, ''));
-              if (!isNaN(price) && price > 0) {
-                prices.push(price);
+          const $item = $(el);
+
+          // Get quantity range from first div (usually has text-sm class)
+          const quantityText = $item.find("div").first().text().trim();
+
+          // Get price from second div or span (usually has text-2xl or font-bold)
+          const priceText =
+            $item.find("span").first().text().trim() ||
+            $item.find("div").eq(1).text().trim() ||
+            $item.find("div").last().text().trim();
+
+          // Extract currency from price text
+          if (priceText.includes("NGN") || priceText.includes("₦"))
+            currency = "NGN";
+          else if (priceText.includes("CNY") || priceText.includes("¥"))
+            currency = "CNY";
+          else if (priceText.includes("USD") || priceText.includes("US$"))
+            currency = "USD";
+          else if (priceText.includes("EUR") || priceText.includes("€"))
+            currency = "EUR";
+          else if (priceText.includes("GBP") || priceText.includes("£"))
+            currency = "GBP";
+
+          // Parse quantity range
+          // Patterns: "2 - 200 pairs", "201 - 1000 pairs", ">= 1000000 pairs", "> 5000"
+          let minQty = 1;
+          let maxQty: number | null = null;
+
+          // Handle ">= X" or "> X" format
+          const greaterThanMatch =
+            quantityText.match(/>\s*=\s*(\d+)/i) ||
+            quantityText.match(/>\s*(\d+)/i);
+          if (greaterThanMatch) {
+            minQty = parseInt(greaterThanMatch[1]);
+            maxQty = null; // No upper limit
+          } else {
+            // Handle "X - Y" or "X-Y" format
+            const rangeMatch = quantityText.match(/(\d+)\s*[-~–—]\s*(\d+)/);
+            if (rangeMatch) {
+              minQty = parseInt(rangeMatch[1]);
+              maxQty = parseInt(rangeMatch[2]);
+            } else {
+              // Try single number
+              const singleMatch = quantityText.match(/(\d+)/);
+              if (singleMatch) {
+                minQty = parseInt(singleMatch[1]);
               }
-            });
+            }
+          }
+
+          // Extract price number (remove currency symbols and spaces)
+          const priceMatch = priceText.match(
+            /(?:USD|CNY|EUR|GBP|NGN|US\$|¥|€|£|₦)?\s*([\d,]+\.?\d*)/
+          );
+          if (priceMatch) {
+            const price = parseFloat(
+              priceMatch[1].replace(/,/g, "").replace(/\s/g, "")
+            );
+            if (!isNaN(price) && price > 0) {
+              priceTiers.push({
+                minQuantity: minQty,
+                maxQuantity: maxQty,
+                price: price,
+                currency: currency,
+              });
+              prices.push(price);
+            }
           }
         });
       }
 
+      // Fallback: Try the product-price container if no ladder pricing found
+      if (priceTiers.length === 0) {
+        const priceContainer = $(
+          '[data-testid="product-price"], .module_price'
+        );
+
+        if (priceContainer.length > 0) {
+          // Look for ladder pricing structure (quantity-based pricing)
+          const ladderItems = priceContainer.find(
+            '[class*="ladder"], [class*="price-item"], .price-row, tr'
+          );
+
+          ladderItems.each((_, el) => {
+            const text = $(el).text().trim();
+
+            // Extract currency from text
+            if (text.includes("NGN") || text.includes("₦")) currency = "NGN";
+            else if (text.includes("CNY") || text.includes("¥"))
+              currency = "CNY";
+            else if (text.includes("USD") || text.includes("US$"))
+              currency = "USD";
+            else if (text.includes("EUR") || text.includes("€"))
+              currency = "EUR";
+            else if (text.includes("GBP") || text.includes("£"))
+              currency = "GBP";
+
+            // Try to extract quantity range and price
+            // Pattern: "1-99 pieces" or "100-499 pieces" or "500+ pieces"
+            const quantityMatch = text.match(
+              /(\d+)\s*[-~–—]\s*(\d+|\+)\s*(?:pieces?|units?|pairs?|sets?|pcs?)/i
+            );
+            const priceMatch = text.match(
+              /(?:USD|CNY|EUR|GBP|NGN|US\$|¥|€|£|₦)?\s*([\d,]+\.?\d*)/g
+            );
+
+            if (quantityMatch && priceMatch) {
+              const minQty = parseInt(quantityMatch[1]);
+              const maxQtyStr = quantityMatch[2];
+              const maxQty = maxQtyStr === "+" ? null : parseInt(maxQtyStr);
+
+              // Extract price (usually the last number in the match)
+              const priceNumbers = priceMatch
+                .map((m) => {
+                  const num = m.replace(/[^\d.,]/g, "").replace(/,/g, "");
+                  return parseFloat(num);
+                })
+                .filter((p) => !isNaN(p) && p > 0);
+
+              if (priceNumbers.length > 0) {
+                const price = priceNumbers[priceNumbers.length - 1]; // Usually the last one is the price
+                priceTiers.push({
+                  minQuantity: minQty,
+                  maxQuantity: maxQty,
+                  price: price,
+                  currency: currency,
+                });
+                prices.push(price);
+              }
+            } else {
+              // Fallback: Extract any price numbers from the text
+              const numbers = text.match(/[\d,]+\.?\d*/g);
+              if (numbers) {
+                numbers.forEach((num) => {
+                  const price = parseFloat(
+                    num.replace(/,/g, "").replace(/\s/g, "")
+                  );
+                  if (!isNaN(price) && price > 0 && price < 1000000) {
+                    prices.push(price);
+                  }
+                });
+              }
+            }
+          });
+        }
+      }
+
+      // Try to find ladder pricing in table format
+      if (priceTiers.length === 0) {
+        const priceTable = $(
+          'table[class*="price"], table[class*="ladder"], .price-table'
+        );
+        if (priceTable.length > 0) {
+          priceTable.find("tr").each((_, row) => {
+            const cells = $(row).find("td, th");
+            if (cells.length >= 2) {
+              const cellText = cells
+                .map((_, cell) => $(cell).text().trim())
+                .get();
+              const quantityText = cellText[0] || "";
+              const priceText =
+                cellText[1] || cellText[cellText.length - 1] || "";
+
+              // Extract quantity range
+              const qtyMatch = quantityText.match(/(\d+)\s*[-~–—]\s*(\d+|\+)/);
+              if (qtyMatch) {
+                const minQty = parseInt(qtyMatch[1]);
+                const maxQtyStr = qtyMatch[2];
+                const maxQty = maxQtyStr === "+" ? null : parseInt(maxQtyStr);
+
+                // Extract price
+                const priceMatch = priceText.match(
+                  /(?:USD|CNY|EUR|GBP|NGN|US\$|¥|€|£|₦)?\s*([\d,]+\.?\d*)/
+                );
+                if (priceMatch) {
+                  const price = parseFloat(priceMatch[1].replace(/,/g, ""));
+                  if (!isNaN(price) && price > 0) {
+                    // Detect currency
+                    if (priceText.includes("NGN") || priceText.includes("₦"))
+                      currency = "NGN";
+                    else if (
+                      priceText.includes("CNY") ||
+                      priceText.includes("¥")
+                    )
+                      currency = "CNY";
+                    else if (
+                      priceText.includes("USD") ||
+                      priceText.includes("US$")
+                    )
+                      currency = "USD";
+                    else if (
+                      priceText.includes("EUR") ||
+                      priceText.includes("€")
+                    )
+                      currency = "EUR";
+                    else if (
+                      priceText.includes("GBP") ||
+                      priceText.includes("£")
+                    )
+                      currency = "GBP";
+
+                    priceTiers.push({
+                      minQuantity: minQty,
+                      maxQuantity: maxQty,
+                      price: price,
+                      currency: currency,
+                    });
+                    prices.push(price);
+                  }
+                }
+              }
+            }
+          });
+        }
+      }
+
       // Fallback: Try meta tags
       if (prices.length === 0) {
-        const metaPrice = $('meta[property="product:price:amount"]').attr('content');
-        const metaCurrency = $('meta[property="product:price:currency"]').attr('content');
-        
+        const metaPrice = $('meta[property="product:price:amount"]').attr(
+          "content"
+        );
+        const metaCurrency = $('meta[property="product:price:currency"]').attr(
+          "content"
+        );
+
         if (metaPrice) {
           const price = parseFloat(metaPrice);
           if (!isNaN(price)) {
             prices.push(price);
-            currency = metaCurrency || 'USD';
+            currency = metaCurrency || "USD";
           }
         }
       }
@@ -142,9 +354,9 @@ export class AlibabaScraper {
       // Fallback: Search for common price patterns
       if (prices.length === 0) {
         const priceSelectors = [
-          '.price-text',
+          ".price-text",
           '[class*="price"]',
-          '.product-price',
+          ".product-price",
           '[data-pl="price"]',
         ];
 
@@ -152,42 +364,63 @@ export class AlibabaScraper {
           const elements = $(selector);
           elements.each((_, el) => {
             const text = $(el).text().trim();
-            
+
             // Look for currency
-            if (text.includes('NGN')) currency = 'NGN';
-            else if (text.includes('CNY') || text.includes('¥')) currency = 'CNY';
-            else if (text.includes('USD') || text.includes('$')) currency = 'USD';
-            
+            if (text.includes("NGN")) currency = "NGN";
+            else if (text.includes("CNY") || text.includes("¥"))
+              currency = "CNY";
+            else if (text.includes("USD") || text.includes("$"))
+              currency = "USD";
+
             const numbers = text.match(/[\d,]+\.?\d*/g);
             if (numbers) {
-              numbers.forEach(num => {
-                const price = parseFloat(num.replace(/,/g, ''));
+              numbers.forEach((num) => {
+                const price = parseFloat(num.replace(/,/g, ""));
                 if (!isNaN(price) && price > 0 && price < 1000000) {
                   prices.push(price);
                 }
               });
             }
           });
-          
+
           if (prices.length > 0) break;
         }
       }
 
       // Filter out outliers and sort
       if (prices.length > 0) {
-        prices = prices.filter(p => p > 0).sort((a, b) => a - b);
-        
-        return {
-          min: prices[0],
-          max: prices[prices.length - 1],
-          currency,
-        };
+        prices = prices.filter((p) => p > 0).sort((a, b) => a - b);
       }
+
+      // If we have price tiers, sort them by quantity
+      if (priceTiers.length > 0) {
+        priceTiers.sort((a, b) => a.minQuantity - b.minQuantity);
+      } else if (prices.length > 0) {
+        // If no tiers found but we have prices, create a single tier
+        priceTiers.push({
+          minQuantity: 1,
+          maxQuantity: null,
+          price: prices[0],
+          currency: currency,
+        });
+      }
+
+      return {
+        price:
+          prices.length > 0
+            ? {
+                min: prices[0],
+                max: prices[prices.length - 1],
+                currency,
+              }
+            : null,
+        priceTiers: priceTiers,
+      };
     } catch (error) {
-      console.error('Error extracting price:', error);
+      console.error("Error extracting price:", error);
     }
 
-    return null;
+    return { price: null, priceTiers: [] };
   }
 
   /**
@@ -195,27 +428,31 @@ export class AlibabaScraper {
    */
   private extractMOQ(): string | null {
     const $ = this.$;
-    
+
     // Modern Alibaba shows MOQ in ladder pricing ranges
-    const priceRanges = $('[data-testid="ladder-price"] .price-item, .price-item');
+    const priceRanges = $(
+      '[data-testid="ladder-price"] .price-item, .price-item'
+    );
     if (priceRanges.length > 0) {
       const firstRange = $(priceRanges[0]).text().trim();
-      const match = firstRange.match(/(\d+)\s*-\s*\d+\s*(pairs?|pieces?|units?)/i);
+      const match = firstRange.match(
+        /(\d+)\s*-\s*\d+\s*(pairs?|pieces?|units?)/i
+      );
       if (match) {
         return `${match[1]} ${match[2]}`;
       }
-      
+
       // Try to get just the number and unit
       const simpleMatch = firstRange.match(/(\d+)\s*(pairs?|pieces?|units?)/i);
       if (simpleMatch) {
         return `${simpleMatch[1]} ${simpleMatch[2]}`;
       }
     }
-    
+
     const moqSelectors = [
       '[class*="moq"]',
       '[class*="minimum-order"]',
-      '.min-order',
+      ".min-order",
       '[data-pl="moq"]',
     ];
 
@@ -225,11 +462,13 @@ export class AlibabaScraper {
     }
 
     // Try to find MOQ in text content
-    const bodyText = $('body').text();
-    const moqMatch = bodyText.match(/(?:MOQ|Minimum Order|Min\. Order)[:\s]+(\d+\s*\w+)/i);
+    const bodyText = $("body").text();
+    const moqMatch = bodyText.match(
+      /(?:MOQ|Minimum Order|Min\. Order)[:\s]+(\d+\s*\w+)/i
+    );
     if (moqMatch) return moqMatch[1];
 
-    return '1 piece';
+    return "1 piece";
   }
 
   /**
@@ -241,9 +480,11 @@ export class AlibabaScraper {
     let mainImage: string | null = null;
 
     // Modern Alibaba uses background-image in style attribute for thumbnails
-    const thumbElements = $('[class*="thumb"], .image-thumb, [role="group"][aria-roledescription="slide"]');
+    const thumbElements = $(
+      '[class*="thumb"], .image-thumb, [role="group"][aria-roledescription="slide"]'
+    );
     thumbElements.each((_, el) => {
-      const style = $(el).attr('style');
+      const style = $(el).attr("style");
       if (style) {
         const bgMatch = style.match(/background-image:\s*url\(['"](.*?)['"]\)/);
         if (bgMatch) {
@@ -258,18 +499,18 @@ export class AlibabaScraper {
     // Extract main image from various sources
     const mainImageSelectors = [
       '[data-testid="product-image-view"] img',
-      '.current-main-image',
-      '.main-image img',
-      '.product-image img',
+      ".current-main-image",
+      ".main-image img",
+      ".product-image img",
       '[class*="main-img"]',
-      '.image-view img',
+      ".image-view img",
       '[data-pl="main-image"]',
       '[data-testid="media-image"] img',
     ];
 
     for (const selector of mainImageSelectors) {
       const element = $(selector).first();
-      const src = element.attr('src') || element.attr('data-src');
+      const src = element.attr("src") || element.attr("data-src");
       if (src) {
         mainImage = this.normalizeImageUrl(src);
         break;
@@ -278,17 +519,20 @@ export class AlibabaScraper {
 
     // Extract all product images from img tags
     const imageSelectors = [
-      '.image-thumb img',
-      '.product-images img',
+      ".image-thumb img",
+      ".product-images img",
       '[class*="thumb"] img',
-      '.image-gallery img',
+      ".image-gallery img",
       '[data-pl="product-image"]',
       '[data-testid="media-image"] img',
     ];
 
-    imageSelectors.forEach(selector => {
+    imageSelectors.forEach((selector) => {
       $(selector).each((_, el) => {
-        const src = $(el).attr('src') || $(el).attr('data-src') || $(el).attr('data-lazy');
+        const src =
+          $(el).attr("src") ||
+          $(el).attr("data-src") ||
+          $(el).attr("data-lazy");
         if (src) {
           const normalizedUrl = this.normalizeImageUrl(src);
           if (normalizedUrl && !images.includes(normalizedUrl)) {
@@ -300,13 +544,23 @@ export class AlibabaScraper {
 
     // If no images found, try all images on page
     if (images.length === 0) {
-      $('img').each((_, el) => {
-        const src = $(el).attr('src') || $(el).attr('data-src');
-        if (src && (src.includes('alicdn.com') || src.includes('alibaba.com')) && 
-            (src.includes('kf/') || src.includes('product') || src.includes('img'))) {
+      $("img").each((_, el) => {
+        const src = $(el).attr("src") || $(el).attr("data-src");
+        if (
+          src &&
+          (src.includes("alicdn.com") || src.includes("alibaba.com")) &&
+          (src.includes("kf/") ||
+            src.includes("product") ||
+            src.includes("img"))
+        ) {
           const normalizedUrl = this.normalizeImageUrl(src);
-          if (normalizedUrl && !images.includes(normalizedUrl) && 
-              !src.includes('icon') && !src.includes('logo') && src.length > 50) {
+          if (
+            normalizedUrl &&
+            !images.includes(normalizedUrl) &&
+            !src.includes("icon") &&
+            !src.includes("logo") &&
+            src.length > 50
+          ) {
             images.push(normalizedUrl);
           }
         }
@@ -326,36 +580,39 @@ export class AlibabaScraper {
    * Normalize image URL (handle relative URLs, thumbnails, etc.)
    */
   private normalizeImageUrl(url: string): string {
-    if (!url) return '';
-    
+    if (!url) return "";
+
     // Remove thumbnail suffixes to get full-size image
-    url = url.replace(/_\d+x\d+\.(jpg|png|webp|jpeg)/i, '.$1');
-    url = url.replace(/_(80x80|50x50|100x100|350x350)\.(jpg|png|webp|jpeg)/i, '.$2');
-    
+    url = url.replace(/_\d+x\d+\.(jpg|png|webp|jpeg)/i, ".$1");
+    url = url.replace(
+      /_(80x80|50x50|100x100|350x350)\.(jpg|png|webp|jpeg)/i,
+      ".$2"
+    );
+
     // Replace small size with larger size for better quality
-    if (url.includes('_480x480')) {
-      url = url.replace('_480x480', '_960x960');
-    } else if (url.includes('80x80')) {
-      url = url.replace('80x80', '960x960');
+    if (url.includes("_480x480")) {
+      url = url.replace("_480x480", "_960x960");
+    } else if (url.includes("80x80")) {
+      url = url.replace("80x80", "960x960");
     }
-    
+
     // Handle relative URLs
-    if (url.startsWith('//')) {
-      return 'https:' + url;
-    } else if (url.startsWith('/')) {
-      return 'https://www.alibaba.com' + url;
+    if (url.startsWith("//")) {
+      return "https:" + url;
+    } else if (url.startsWith("/")) {
+      return "https://www.alibaba.com" + url;
     }
-    
+
     return url;
   }
 
   /**
    * Extract supplier information
    */
-  private extractSupplier(): AlibabaProduct['supplier'] {
+  private extractSupplier(): AlibabaProduct["supplier"] {
     const $ = this.$;
-    
-    const supplier: AlibabaProduct['supplier'] = {
+
+    const supplier: AlibabaProduct["supplier"] = {
       name: null,
       verified: false,
       yearsInBusiness: null,
@@ -365,17 +622,17 @@ export class AlibabaScraper {
 
     // Modern Alibaba structure - extract supplier name from company card or product company
     const nameSelectors = [
-      '.company-name a',
-      '.product-company-info .company-name a',
-      '.supplier-name',
+      ".company-name a",
+      ".product-company-info .company-name a",
+      ".supplier-name",
       '[class*="company-name"]',
-      '.store-name',
+      ".store-name",
       '[data-pl="supplier-name"]',
     ];
 
     for (const selector of nameSelectors) {
       const element = $(selector).first();
-      const name = element.attr('title') || element.text().trim();
+      const name = element.attr("title") || element.text().trim();
       if (name && name.length > 2) {
         supplier.name = name;
         break;
@@ -383,22 +640,27 @@ export class AlibabaScraper {
     }
 
     // Check if verified
-    supplier.verified = $('.verified-supplier').length > 0 || 
-                       $('[class*="verified"]').length > 0 ||
-                       $('body').text().includes('Verified Supplier') ||
-                       $('body').text().includes('Manufacturer') ||
-                       $('body').text().includes('Trading Company');
+    supplier.verified =
+      $(".verified-supplier").length > 0 ||
+      $('[class*="verified"]').length > 0 ||
+      $("body").text().includes("Verified Supplier") ||
+      $("body").text().includes("Manufacturer") ||
+      $("body").text().includes("Trading Company");
 
     // Extract years in business (modern format: "3 yrs")
-    const companyInfo = $('.product-company-info, .company-life').text();
-    const yearsMatch = companyInfo.match(/(\d+)\s*(?:yrs?|years?)\s*(?:on Alibaba)?/i);
+    const companyInfo = $(".product-company-info, .company-life").text();
+    const yearsMatch = companyInfo.match(
+      /(\d+)\s*(?:yrs?|years?)\s*(?:on Alibaba)?/i
+    );
     if (yearsMatch) {
-      supplier.yearsInBusiness = yearsMatch[1] + ' years';
+      supplier.yearsInBusiness = yearsMatch[1] + " years";
     } else {
       // Fallback pattern
-      const bodyMatch = $('body').text().match(/(\d+)\s*(?:years?|yrs?)\s*(?:in business|on Alibaba)/i);
+      const bodyMatch = $("body")
+        .text()
+        .match(/(\d+)\s*(?:years?|yrs?)\s*(?:in business|on Alibaba)/i);
       if (bodyMatch) {
-        supplier.yearsInBusiness = bodyMatch[1] + ' years';
+        supplier.yearsInBusiness = bodyMatch[1] + " years";
       }
     }
 
@@ -406,7 +668,7 @@ export class AlibabaScraper {
     const responseSelectors = [
       '[class*="response-time"]',
       '[class*="Response Time"]',
-      '.response-rate',
+      ".response-rate",
     ];
 
     for (const selector of responseSelectors) {
@@ -419,7 +681,9 @@ export class AlibabaScraper {
     }
 
     // Extract country from flag image or text
-    const countryImg = $('.product-company-info img[src*="flags"], .register-country').parent();
+    const countryImg = $(
+      '.product-company-info img[src*="flags"], .register-country'
+    ).parent();
     if (countryImg.length > 0) {
       const countryText = countryImg.text().trim();
       if (countryText && countryText.length <= 10) {
@@ -429,10 +693,10 @@ export class AlibabaScraper {
 
     if (!supplier.country) {
       const countrySelectors = [
-        '.country',
+        ".country",
         '[class*="location"]',
-        '.supplier-country',
-        '.register-country',
+        ".supplier-country",
+        ".register-country",
       ];
 
       for (const selector of countrySelectors) {
@@ -455,14 +719,18 @@ export class AlibabaScraper {
     const specifications: Record<string, string> = {};
 
     // Modern Alibaba uses data-testid="module-attribute"
-    const attributeSection = $('[data-testid="module-attribute"], .module_attribute');
-    
+    const attributeSection = $(
+      '[data-testid="module-attribute"], .module_attribute'
+    );
+
     if (attributeSection.length > 0) {
       // Look for grid structure with two columns
-      const rows = attributeSection.find('[class*="grid-cols-2"] > div, .id-grid > div');
-      
+      const rows = attributeSection.find(
+        '[class*="grid-cols-2"] > div, .id-grid > div'
+      );
+
       rows.each((_, row) => {
-        const cells = $(row).find('> div');
+        const cells = $(row).find("> div");
         if (cells.length === 2) {
           const key = $(cells[0]).text().trim();
           const value = $(cells[1]).text().trim();
@@ -476,35 +744,42 @@ export class AlibabaScraper {
     // Try to find specifications table
     if (Object.keys(specifications).length === 0) {
       const specSelectors = [
-        '.product-specs table',
-        '.specifications table',
+        ".product-specs table",
+        ".specifications table",
         '[class*="spec"] table',
-        '.product-properties table',
+        ".product-properties table",
       ];
 
       for (const selector of specSelectors) {
-        $(selector).find('tr').each((_, row) => {
-          const cells = $(row).find('td, th');
-          if (cells.length >= 2) {
-            const key = $(cells[0]).text().trim();
-            const value = $(cells[1]).text().trim();
-            if (key && value) {
-              specifications[key] = value;
+        $(selector)
+          .find("tr")
+          .each((_, row) => {
+            const cells = $(row).find("td, th");
+            if (cells.length >= 2) {
+              const key = $(cells[0]).text().trim();
+              const value = $(cells[1]).text().trim();
+              if (key && value) {
+                specifications[key] = value;
+              }
             }
-          }
-        });
+          });
       }
     }
 
     // Try key-value pairs in divs
     if (Object.keys(specifications).length === 0) {
-      $('.specification-item, .spec-item, [class*="property"]').each((_, el) => {
-        const key = $(el).find('.spec-key, .property-key, dt').text().trim();
-        const value = $(el).find('.spec-value, .property-value, dd').text().trim();
-        if (key && value) {
-          specifications[key] = value;
+      $('.specification-item, .spec-item, [class*="property"]').each(
+        (_, el) => {
+          const key = $(el).find(".spec-key, .property-key, dt").text().trim();
+          const value = $(el)
+            .find(".spec-value, .property-value, dd")
+            .text()
+            .trim();
+          if (key && value) {
+            specifications[key] = value;
+          }
         }
-      });
+      );
     }
 
     return specifications;
@@ -515,11 +790,11 @@ export class AlibabaScraper {
    */
   private extractDescription(): string | null {
     const $ = this.$;
-    
+
     const descSelectors = [
-      '.product-description',
+      ".product-description",
       '[class*="description"]',
-      '.detail-desc',
+      ".detail-desc",
       '[data-pl="description"]',
     ];
 
@@ -538,18 +813,18 @@ export class AlibabaScraper {
    */
   private extractCategory(): string | null {
     const $ = this.$;
-    
+
     const categorySelectors = [
-      '.breadcrumb',
+      ".breadcrumb",
       '[class*="category"]',
-      '.product-category',
+      ".product-category",
       '[data-pl="breadcrumb"]',
     ];
 
     for (const selector of categorySelectors) {
       const category = $(selector).first().text().trim();
       if (category) {
-        return category.replace(/\s+/g, ' ');
+        return category.replace(/\s+/g, " ");
       }
     }
 
@@ -561,11 +836,11 @@ export class AlibabaScraper {
    */
   private extractSKU(): string | null {
     const $ = this.$;
-    
+
     const skuSelectors = [
       '[class*="sku"]',
       '[class*="product-id"]',
-      '.item-number',
+      ".item-number",
     ];
 
     for (const selector of skuSelectors) {
@@ -577,7 +852,7 @@ export class AlibabaScraper {
     }
 
     // Try to find in meta tags
-    const metaSku = $('meta[property="product:sku"]').attr('content');
+    const metaSku = $('meta[property="product:sku"]').attr("content");
     if (metaSku) return metaSku;
 
     return null;
@@ -586,25 +861,25 @@ export class AlibabaScraper {
   /**
    * Extract rating and reviews
    */
-  private extractRating(): AlibabaProduct['rating'] {
+  private extractRating(): AlibabaProduct["rating"] {
     const $ = this.$;
-    
-    const rating: AlibabaProduct['rating'] = {
+
+    const rating: AlibabaProduct["rating"] = {
       score: null,
       reviewCount: null,
     };
 
     // Modern Alibaba structure - extract from comment section
-    const commentSection = $('.detail-product-comment, .module_comment');
+    const commentSection = $(".detail-product-comment, .module_comment");
     if (commentSection.length > 0) {
       const text = commentSection.text();
-      
+
       // Extract rating score (e.g., "4.2")
       const scoreMatch = text.match(/(\d+\.?\d*)\s*\(/);
       if (scoreMatch) {
         rating.score = parseFloat(scoreMatch[1]);
       }
-      
+
       // Extract review count (e.g., "(35 reviews)")
       const reviewMatch = text.match(/\((\d+)\s*(?:reviews?|ratings?)\)/i);
       if (reviewMatch) {
@@ -615,14 +890,16 @@ export class AlibabaScraper {
     // Fallback: Try rating selectors
     if (!rating.score) {
       const ratingSelectors = [
-        '.rating-score',
+        ".rating-score",
         '[class*="rating"]',
-        '.star-rating',
+        ".star-rating",
       ];
 
       for (const selector of ratingSelectors) {
         const ratingText = $(selector).first().text().trim();
-        const ratingMatch = ratingText.match(/(\d+\.?\d*)\s*(?:\/\s*5|stars?)?/i);
+        const ratingMatch = ratingText.match(
+          /(\d+\.?\d*)\s*(?:\/\s*5|stars?)?/i
+        );
         if (ratingMatch) {
           rating.score = parseFloat(ratingMatch[1]);
           break;
@@ -632,8 +909,10 @@ export class AlibabaScraper {
 
     // Fallback: Extract review count from anywhere
     if (!rating.reviewCount) {
-      const reviewText = $('body').text();
-      const reviewMatch = reviewText.match(/\((\d+)\s*(?:reviews?|ratings?)\)/i);
+      const reviewText = $("body").text();
+      const reviewMatch = reviewText.match(
+        /\((\d+)\s*(?:reviews?|ratings?)\)/i
+      );
       if (reviewMatch) {
         rating.reviewCount = parseInt(reviewMatch[1]);
       }
@@ -645,16 +924,18 @@ export class AlibabaScraper {
   /**
    * Extract shipping information
    */
-  private extractShipping(): AlibabaProduct['shipping'] {
+  private extractShipping(): AlibabaProduct["shipping"] {
     const $ = this.$;
-    
-    const shipping: AlibabaProduct['shipping'] = {
+
+    const shipping: AlibabaProduct["shipping"] = {
       leadTime: null,
       shippingMethods: [],
     };
 
     // Extract lead time
-    const leadTimeMatch = $('body').text().match(/(?:Lead Time|Delivery Time)[:\s]+([^<\n]+)/i);
+    const leadTimeMatch = $("body")
+      .text()
+      .match(/(?:Lead Time|Delivery Time)[:\s]+([^<\n]+)/i);
     if (leadTimeMatch) {
       shipping.leadTime = leadTimeMatch[1].trim();
     }
@@ -675,10 +956,12 @@ export class AlibabaScraper {
    */
   public scrape(): AlibabaProduct {
     const { images, mainImage } = this.extractImages();
+    const { price, priceTiers } = this.extractPrice();
 
     return {
       title: this.extractTitle(),
-      price: this.extractPrice(),
+      price: price,
+      priceTiers: priceTiers,
       moq: this.extractMOQ(),
       images,
       mainImage,
