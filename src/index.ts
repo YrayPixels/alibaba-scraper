@@ -3,6 +3,13 @@ import cors from "cors";
 import dotenv from "dotenv";
 import { scrapeFromUrl } from "./scrapers/alibaba-scraper.js";
 import { scrapeFromUrlWithBrowser } from "./scrapers/browser-scraper.js";
+import {
+  initializeCache,
+  getCachedProduct,
+  setCachedProduct,
+  closeCache,
+  isCacheAvailable,
+} from "./cache.js";
 
 dotenv.config();
 
@@ -10,8 +17,15 @@ console.log("🔧 Starting application...");
 console.log("🔧 NODE_ENV:", process.env.NODE_ENV || "not set");
 console.log("🔧 PORT:", process.env.PORT || "not set (will use 3001)");
 
+// Initialize Redis cache
+initializeCache();
+
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 8000;
+
+// Cache TTL in seconds (default 6 hours to prevent stale data, configurable via env)
+// 6 hours balances freshness with performance - product prices/details can change
+const CACHE_TTL = Number(process.env.CACHE_TTL_SECONDS) || 6 * 60 * 60;
 
 // Middleware
 app.use(cors());
@@ -48,7 +62,7 @@ app.get("/health", (req, res) => {
 // Scrape product endpoint
 app.post("/scrape", async (req, res) => {
   try {
-    const { url, useBrowser = true, retries = 2 } = req.body;
+    const { url, useBrowser = true, retries = 2, forceRefresh = false } = req.body;
 
     // Validate URL
     if (!url) {
@@ -62,8 +76,20 @@ app.post("/scrape", async (req, res) => {
       });
     }
 
+    // Check cache first (unless forceRefresh is true)
+    if (!forceRefresh && isCacheAvailable()) {
+      const cachedProduct = await getCachedProduct(url);
+      if (cachedProduct) {
+        return res.json({
+          success: true,
+          product: cachedProduct,
+          cached: true,
+        });
+      }
+    }
+
     console.log(
-      `🔍 Scraping product with ${useBrowser ? "browser" : "fetch"} method`
+      `🔍 Scraping product with ${useBrowser ? "browser" : "fetch"} method${forceRefresh ? " (force refresh)" : ""}`
     );
 
     // Scrape the product using browser (Puppeteer) or fetch
@@ -84,10 +110,16 @@ app.post("/scrape", async (req, res) => {
       product = await scrapeFromUrl(url);
     }
 
+    // Cache the scraped product
+    if (isCacheAvailable()) {
+      await setCachedProduct(url, product, CACHE_TTL);
+    }
+
     // Return the scraped product data
     return res.json({
       success: true,
       product,
+      cached: false,
     });
   } catch (error) {
     console.error("Scraping error:", error);
@@ -164,5 +196,18 @@ process.on("unhandledRejection", (reason, promise) => {
 process.on("uncaughtException", (error) => {
   console.error("❌ Uncaught Exception:", error);
   process.exit(1);
+});
+
+// Graceful shutdown
+process.on("SIGTERM", async () => {
+  console.log("🛑 SIGTERM received, shutting down gracefully...");
+  await closeCache();
+  process.exit(0);
+});
+
+process.on("SIGINT", async () => {
+  console.log("🛑 SIGINT received, shutting down gracefully...");
+  await closeCache();
+  process.exit(0);
 });
 

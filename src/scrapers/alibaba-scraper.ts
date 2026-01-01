@@ -11,6 +11,24 @@ export interface PriceTier {
 }
 
 /**
+ * Interface for product variation option
+ */
+export interface VariationOption {
+  value: string; // e.g., "White", "39(US 6.5)"
+  imageUrl?: string | null; // For color variations
+  selected?: boolean; // Whether this option is currently selected
+}
+
+/**
+ * Interface for product variation (color, size, etc.)
+ */
+export interface ProductVariation {
+  name: string; // e.g., "Color", "EUR Size", "Size"
+  type: 'color' | 'size' | 'text' | 'other'; // Type of variation
+  options: VariationOption[];
+}
+
+/**
  * Interface for Alibaba product data
  */
 export interface AlibabaProduct {
@@ -44,6 +62,7 @@ export interface AlibabaProduct {
     leadTime: string | null;
     shippingMethods: string[];
   };
+  variations: ProductVariation[]; // Product variations (color, size, etc.)
 }
 
 /**
@@ -952,6 +971,231 @@ export class AlibabaScraper {
   }
 
   /**
+   * Extract product variations (color, size, etc.)
+   */
+  private extractVariations(): ProductVariation[] {
+    const $ = this.$;
+    const variations: ProductVariation[] = [];
+
+    try {
+      // Modern Alibaba structure: variations are in module_sku
+      // Each variation has a title (h4 with data-testid="sku-list-title") and items container (div with data-testid="sku-list-item")
+      
+      // Find the SKU module container
+      const skuModule = $('[data-module-name="module_sku"], .module_sku, [data-testid="sku-layout"]');
+      
+      // Find all variation titles (h4 elements with data-testid="sku-list-title")
+      const variationTitles = skuModule.find('[data-testid="sku-list-title"]');
+
+      variationTitles.each((_, titleEl) => {
+        const $title = $(titleEl);
+        
+        // Extract variation name from title
+        // Title format: "Color: White" or "EUR Size" or just "Color"
+        let variationName = $title.text().trim();
+        
+        // Extract the actual variation name (before colon if present)
+        const nameMatch = variationName.match(/^([^:]+)/);
+        if (nameMatch) {
+          variationName = nameMatch[1].trim();
+        }
+        
+        // Also try to get from span if title has nested structure
+        const spanText = $title.find('span').first().text().trim();
+        if (spanText && spanText.length > variationName.length) {
+          const spanMatch = spanText.match(/^([^:]+)/);
+          if (spanMatch) {
+            variationName = spanMatch[1].trim();
+          }
+        }
+
+        // Determine variation type based on name
+        let variationType: ProductVariation['type'] = 'other';
+        const nameLower = variationName.toLowerCase();
+        if (nameLower.includes('color') || nameLower.includes('colour')) {
+          variationType = 'color';
+        } else if (nameLower.includes('size') || nameLower.includes('sizing')) {
+          variationType = 'size';
+        } else {
+          variationType = 'text';
+        }
+
+        // Find the items container - it's the next sibling div with data-testid="sku-list-item"
+        let itemsContainer = $title.next('[data-testid="sku-list-item"]').first();
+        
+        // If not found as next sibling, try to find in parent's next sibling
+        if (itemsContainer.length === 0) {
+          itemsContainer = $title.parent().next('[data-testid="sku-list-item"]').first();
+        }
+        
+        // If still not found, look for the container that follows the title
+        if (itemsContainer.length === 0) {
+          // Find the parent div that contains both title and items
+          const parentContainer = $title.closest('[data-testid="sku-list"], div');
+          itemsContainer = parentContainer.find('[data-testid="sku-list-item"]').first();
+        }
+
+        // Get all variation options
+        const options: VariationOption[] = [];
+        
+        if (itemsContainer.length > 0) {
+          // Find all option items
+          const optionElements = itemsContainer.find('[data-testid="non-last-sku-item"], [data-testid="sku-item"], [class*="sku-item"]');
+
+          optionElements.each((_, item) => {
+            const $item = $(item);
+            
+            // Check if this option is selected
+            const isSelected = $item.hasClass('selected') ||
+                              $item.find('.selected, [class*="selected"]').length > 0 ||
+                              $item.find('[class*="double-bordered-box"].selected').length > 0 ||
+                              $item.find('[class*="double-bordered-box"].enabled.selected').length > 0;
+
+            // Try to extract image (for color variations)
+            let imageUrl: string | null = null;
+            const img = $item.find('img').first();
+            
+            if (img.length > 0) {
+              // Get image URL
+              const src = img.attr('src') || img.attr('data-src');
+              if (src) {
+                imageUrl = this.normalizeImageUrl(src);
+              }
+              
+              // Get value from alt text or title attribute
+              const altText = img.attr('alt') || img.attr('title') || '';
+              if (altText && altText.trim().length > 0) {
+                options.push({
+                  value: altText.trim(),
+                  imageUrl,
+                  selected: isSelected,
+                });
+              }
+            } else {
+              // For text-based variations (sizes), get from span or div text
+              // Look for text in spans or divs that are direct children
+              const textElements = $item.find('> span, > div, span[class*="text"], div[class*="text"]');
+              
+              if (textElements.length > 0) {
+                textElements.each((_, textEl) => {
+                  const $textEl = $(textEl);
+                  const value = $textEl.text().trim();
+                  
+                  // Only add if it's a reasonable length and not empty
+                  if (value && value.length > 0 && value.length < 100 && !value.match(/^\d+$/)) {
+                    // Avoid duplicates
+                    if (!options.some(opt => opt.value === value)) {
+                      options.push({
+                        value: value,
+                        imageUrl: null,
+                        selected: isSelected,
+                      });
+                    }
+                  }
+                });
+              } else {
+                // Fallback: get all text from the item
+                const allText = $item.text().trim();
+                if (allText && allText.length > 0 && allText.length < 100) {
+                  options.push({
+                    value: allText,
+                    imageUrl: null,
+                    selected: isSelected,
+                  });
+                }
+              }
+            }
+          });
+        }
+
+        // If we found options, add this variation
+        if (options.length > 0 && variationName && variationName.length > 0) {
+          variations.push({
+            name: variationName,
+            type: variationType,
+            options: options,
+          });
+        }
+      });
+
+      // Fallback: Try to find variations in module_sku
+      if (variations.length === 0) {
+        const skuModule = $('.module_sku, [data-module-name="module_sku"]');
+        
+        if (skuModule.length > 0) {
+          // Look for variation groups
+          skuModule.find('h3, h4').each((_, titleEl) => {
+            const $title = $(titleEl);
+            const titleText = $title.text().trim();
+            
+            // Check if this looks like a variation title
+            if (titleText.match(/^(Color|Size|Colour|EUR Size|US Size|UK Size|Style|Material)/i)) {
+              const variationName = titleText.replace(/^[^:]*:\s*/, '').trim() || titleText;
+              let variationType: ProductVariation['type'] = 'other';
+              
+              const nameLower = variationName.toLowerCase();
+              if (nameLower.includes('color') || nameLower.includes('colour')) {
+                variationType = 'color';
+              } else if (nameLower.includes('size')) {
+                variationType = 'size';
+              }
+
+              const options: VariationOption[] = [];
+              
+              // Find options in the next sibling or parent container
+              const container = $title.next('[class*="flex"], [class*="grid"], div').first();
+              if (container.length === 0) {
+                const parent = $title.parent();
+                container.find('[class*="flex"], [class*="grid"], div').first();
+              }
+
+              container.find('img, span, div[class*="box"]').each((_, optionEl) => {
+                const $option = $(optionEl);
+                
+                // Check for image
+                const img = $option.is('img') ? $option : $option.find('img').first();
+                if (img.length > 0) {
+                  const src = img.attr('src') || img.attr('data-src');
+                  const alt = img.attr('alt') || img.attr('title') || '';
+                  if (alt) {
+                    options.push({
+                      value: alt.trim(),
+                      imageUrl: src ? this.normalizeImageUrl(src) : null,
+                      selected: false,
+                    });
+                  }
+                } else {
+                  // Text option
+                  const text = $option.text().trim();
+                  if (text && text.length > 0 && text.length < 50) {
+                    options.push({
+                      value: text,
+                      imageUrl: null,
+                      selected: false,
+                    });
+                  }
+                }
+              });
+
+              if (options.length > 0) {
+                variations.push({
+                  name: variationName,
+                  type: variationType,
+                  options: options,
+                });
+              }
+            }
+          });
+        }
+      }
+    } catch (error) {
+      console.error('Error extracting variations:', error);
+    }
+
+    return variations;
+  }
+
+  /**
    * Scrape all product data
    */
   public scrape(): AlibabaProduct {
@@ -973,6 +1217,7 @@ export class AlibabaScraper {
       sku: this.extractSKU(),
       rating: this.extractRating(),
       shipping: this.extractShipping(),
+      variations: this.extractVariations(),
     };
   }
 }
