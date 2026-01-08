@@ -1,9 +1,10 @@
-FROM node:20-slim
+FROM node:20
 
-# Install Chrome dependencies and Chrome
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget \
-    gnupg \
+# Install minimal dependencies for Chromium (bundled with Puppeteer)
+# These are the essential libraries needed for headless browser operation
+# Using retry logic in case of transient network issues
+RUN apt-get update || (sleep 5 && apt-get update) || (sleep 10 && apt-get update) \
+    && apt-get install -y --no-install-recommends \
     ca-certificates \
     fonts-liberation \
     libasound2 \
@@ -39,10 +40,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxtst6 \
     lsb-release \
     xdg-utils \
-    && wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/googlechrome-linux-keyring.gpg \
-    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/googlechrome-linux-keyring.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends google-chrome-stable \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -69,7 +66,7 @@ EXPOSE 3001
 ENV NODE_ENV=production
 ENV PORT=3001
 ENV PUPPETEER_HEADLESS=true
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
+# Puppeteer will use bundled Chromium, no need to set executable path
 
 # Start the application
 CMD ["npm", "start"]

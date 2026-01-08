@@ -1,4 +1,4 @@
-import puppeteer from "puppeteer-core";
+import puppeteer from "puppeteer";
 import { AlibabaScraper, AlibabaProduct } from "./alibaba-scraper.js";
 
 /**
@@ -59,15 +59,14 @@ export async function scrapeWithBrowser(
 
   console.log(`🚀 Launching browser for: ${url}`);
 
-  // Determine Chrome path for production
-  const chromePath =
-    process.env.PUPPETEER_EXECUTABLE_PATH ||
-    (process.env.NODE_ENV === "production"
-      ? "/usr/bin/google-chrome-stable" // Railway/DigitalOcean
-      : "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"); // Use bundled Chromium in development
+  // Use Puppeteer's bundled Chromium (no need to specify executablePath)
+  // If PUPPETEER_EXECUTABLE_PATH is set, use it (for custom Chrome installations)
+  const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
 
-  if (chromePath) {
-    console.log(`📍 Using Chrome at: ${chromePath}`);
+  if (executablePath) {
+    console.log(`📍 Using Chrome at: ${executablePath}`);
+  } else {
+    console.log(`📍 Using Puppeteer's bundled Chromium`);
   }
 
   const browser = await puppeteer.launch({
@@ -78,7 +77,7 @@ export async function scrapeWithBrowser(
       "--disable-blink-features=AutomationControlled",
       "--window-size=1920,1080",
     ],
-    executablePath: chromePath,
+    ...(executablePath && { executablePath }),
   });
 
   let page;
