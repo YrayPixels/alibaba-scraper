@@ -25,6 +25,26 @@ const DEFAULT_CONFIG: BrowserConfig = {
 };
 
 /**
+ * Normalize URL by adding protocol if missing
+ */
+function normalizeUrl(url: string): string {
+  if (!url) return url;
+  
+  // If URL already has protocol, return as-is
+  if (url.match(/^https?:\/\//i)) {
+    return url;
+  }
+  
+  // If URL starts with //, add https:
+  if (url.startsWith("//")) {
+    return "https:" + url;
+  }
+  
+  // Otherwise, add https://
+  return "https://" + url;
+}
+
+/**
  * Scrape Alibaba product using Puppeteer (real browser)
  * This bypasses most anti-bot protection
  */
@@ -33,6 +53,9 @@ export async function scrapeWithBrowser(
   config: BrowserConfig = {}
 ): Promise<AlibabaProduct> {
   const finalConfig = { ...DEFAULT_CONFIG, ...config };
+
+  // Normalize URL (add protocol if missing)
+  url = normalizeUrl(url);
 
   console.log(`🚀 Launching browser for: ${url}`);
 

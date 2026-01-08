@@ -59,15 +59,38 @@ app.get("/health", (req, res) => {
   });
 });
 
+/**
+ * Normalize URL by adding protocol if missing
+ */
+function normalizeUrl(url: string): string {
+  if (!url) return url;
+  
+  // If URL already has protocol, return as-is
+  if (url.match(/^https?:\/\//i)) {
+    return url;
+  }
+  
+  // If URL starts with //, add https:
+  if (url.startsWith("//")) {
+    return "https:" + url;
+  }
+  
+  // Otherwise, add https://
+  return "https://" + url;
+}
+
 // Scrape product endpoint
 app.post("/scrape", async (req, res) => {
   try {
-    const { url, useBrowser = true, retries = 2, forceRefresh = false } = req.body;
+    let { url, useBrowser = true, retries = 2, forceRefresh = false } = req.body;
 
     // Validate URL
     if (!url) {
       return res.status(400).json({ error: "URL is required" });
     }
+
+    // Normalize URL (add protocol if missing)
+    url = normalizeUrl(url);
 
     // Validate that it's an Alibaba URL
     if (!url.includes("alibaba.com")) {

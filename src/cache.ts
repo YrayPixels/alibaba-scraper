@@ -87,12 +87,34 @@ export function initializeCache(): void {
 }
 
 /**
+ * Normalize URL by adding protocol if missing
+ */
+function ensureProtocol(url: string): string {
+  if (!url) return url;
+  
+  // If URL already has protocol, return as-is
+  if (url.match(/^https?:\/\//i)) {
+    return url;
+  }
+  
+  // If URL starts with //, add https:
+  if (url.startsWith("//")) {
+    return "https:" + url;
+  }
+  
+  // Otherwise, add https://
+  return "https://" + url;
+}
+
+/**
  * Normalize URL to create a consistent cache key
  * Removes query parameters that don't affect the product page
  */
 function normalizeUrl(url: string): string {
   try {
-    const urlObj = new URL(url);
+    // Ensure URL has a protocol before parsing
+    const urlWithProtocol = ensureProtocol(url);
+    const urlObj = new URL(urlWithProtocol);
     // Remove common tracking/analytics parameters
     const paramsToRemove = [
       "utm_source",
@@ -113,8 +135,8 @@ function normalizeUrl(url: string): string {
     // Return normalized URL
     return urlObj.toString();
   } catch {
-    // If URL parsing fails, return as-is
-    return url;
+    // If URL parsing fails, return as-is (with protocol if we added one)
+    return ensureProtocol(url);
   }
 }
 

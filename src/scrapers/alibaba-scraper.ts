@@ -1237,12 +1237,35 @@ function getRandomUserAgent(): string {
 }
 
 /**
+ * Normalize URL by adding protocol if missing
+ */
+function normalizeUrl(url: string): string {
+  if (!url) return url;
+  
+  // If URL already has protocol, return as-is
+  if (url.match(/^https?:\/\//i)) {
+    return url;
+  }
+  
+  // If URL starts with //, add https:
+  if (url.startsWith("//")) {
+    return "https:" + url;
+  }
+  
+  // Otherwise, add https://
+  return "https://" + url;
+}
+
+/**
  * Scrape Alibaba product from URL with retry logic
  */
 export async function scrapeFromUrl(
   url: string,
   retries: number = 3
 ): Promise<AlibabaProduct> {
+  // Normalize URL (add protocol if missing)
+  url = normalizeUrl(url);
+  
   let lastError: Error | null = null;
 
   for (let attempt = 1; attempt <= retries; attempt++) {
@@ -1316,7 +1339,8 @@ export async function scrapeFromUrl(
       if (
         lastError.message.includes('Access Denied') ||
         lastError.message.includes('404') ||
-        lastError.message.includes('invalid URL')
+        lastError.message.includes('invalid URL') ||
+        lastError.message.includes('Failed to parse URL')
       ) {
         break;
       }
