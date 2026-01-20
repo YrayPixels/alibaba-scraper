@@ -61,10 +61,19 @@ export async function scrapeWithBrowser(
 
   // Use Puppeteer's bundled Chromium (no need to specify executablePath)
   // If PUPPETEER_EXECUTABLE_PATH is set, use it (for custom Chrome installations)
-  const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
-
+  // But check if the file exists first, otherwise fall back to bundled Chromium
+  let executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+  
+  // Check if executable path exists (if provided)
   if (executablePath) {
-    console.log(`📍 Using Chrome at: ${executablePath}`);
+    try {
+      const fs = await import("fs/promises");
+      await fs.access(executablePath);
+      console.log(`📍 Using Chrome at: ${executablePath}`);
+    } catch {
+      console.warn(`⚠️  Chrome not found at ${executablePath}, using Puppeteer's bundled Chromium`);
+      executablePath = undefined;
+    }
   } else {
     console.log(`📍 Using Puppeteer's bundled Chromium`);
   }

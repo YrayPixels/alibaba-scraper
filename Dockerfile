@@ -66,7 +66,9 @@ EXPOSE 3001
 ENV NODE_ENV=production
 ENV PORT=3001
 ENV PUPPETEER_HEADLESS=true
-# Puppeteer will use bundled Chromium, no need to set executable path
+# Puppeteer will use bundled Chromium by default, but can use system Chromium if PUPPETEER_EXECUTABLE_PATH is set
+# Uncomment the line below to use system Chromium instead of bundled version
+# ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 # Start the application
 CMD ["npm", "start"]
