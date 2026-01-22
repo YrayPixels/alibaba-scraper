@@ -22,7 +22,8 @@ console.log("🔧 PORT:", process.env.PORT || "not set (will use 3001)");
 initializeCache();
 
 const app = express();
-const PORT = process.env.PORT || 8000;
+// Railway sets PORT automatically, default to 8080 if not set
+const PORT = process.env.PORT || 8080;
 
 // Cache TTL in seconds (default 6 hours to prevent stale data, configurable via env)
 // 6 hours balances freshness with performance - product prices/details can change

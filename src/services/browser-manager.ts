@@ -36,7 +36,6 @@ class BrowserManager {
   private isLaunching = false;
   private launchPromise: Promise<Browser> | null = null;
   private headless: boolean | "new";
-  private readonly executablePath: string | undefined;
 
   constructor() {
     // Determine headless mode - default to visible in development
@@ -45,8 +44,12 @@ class BrowserManager {
         ? process.env.PUPPETEER_HEADLESS !== "false"
         : process.env.PUPPETEER_HEADLESS === "true";
 
-    // Check for custom executable path
-    this.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+    // Ensure PUPPETEER_EXECUTABLE_PATH is not set (we use bundled Chromium)
+    if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+      console.warn(
+        `⚠️  PUPPETEER_EXECUTABLE_PATH is set but will be ignored. Using bundled Chromium.`
+      );
+    }
   }
 
   /**
@@ -106,84 +109,58 @@ class BrowserManager {
       console.log(`👁️  Browser mode: ${headlessMode}`);
     }
 
-    // Check if executable path exists (if provided)
-    let executablePath = this.executablePath;
-    if (executablePath) {
-      try {
-        const fs = await import("fs/promises");
-        await fs.access(executablePath);
-        console.log(`📍 Using Chrome at: ${executablePath}`);
-      } catch {
-        console.warn(
-          `⚠️  Chrome not found at ${executablePath}, using Puppeteer's bundled Chromium`
-        );
-        // Explicitly unset the environment variable so Puppeteer doesn't try to use it
-        delete process.env.PUPPETEER_EXECUTABLE_PATH;
-        executablePath = undefined;
-      }
-    } else {
-      console.log(`📍 Using Puppeteer's bundled Chromium`);
-    }
+    console.log(`📍 Using Puppeteer's bundled Chromium (recommended for Railway)`);
 
-    // Launch browser with retry logic
+    // Launch browser with Railway-optimized configuration
+    // DO NOT set executablePath - let Puppeteer use its bundled Chromium
+    // Railway will have the bundled Chromium available after npm install
     let browser: Browser;
+    
+    // Ensure PUPPETEER_EXECUTABLE_PATH is not set (Railway might set it incorrectly)
+    if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+      console.warn(
+        `⚠️  PUPPETEER_EXECUTABLE_PATH is set to ${process.env.PUPPETEER_EXECUTABLE_PATH}, but we'll use bundled Chromium instead`
+      );
+      delete process.env.PUPPETEER_EXECUTABLE_PATH;
+    }
+    
     try {
-      // Build launch options - only include executablePath if it's valid
+      // Use Railway-optimized launch config (from guide)
+      // This ensures Puppeteer uses its bundled Chromium, not system Chrome
       const launchOptions: any = {
         headless: this.headless ? "new" : false,
         args: [
           "--no-sandbox",
           "--disable-setuid-sandbox",
-          "--disable-blink-features=AutomationControlled",
           "--disable-dev-shm-usage",
-          "--disable-accelerated-2d-canvas",
-          "--no-first-run",
-          "--no-zygote",
           "--disable-gpu",
-          "--window-size=1920,1080",
-          "--disable-features=IsolateOrigins,site-per-process",
-          "--disable-web-security", // Helps bypass some restrictions
-          "--disable-features=VizDisplayCompositor",
+          "--no-zygote",
+          "--single-process",
         ],
       };
-      
-      // Only add executablePath if it's valid and exists
-      if (executablePath) {
-        launchOptions.executablePath = executablePath;
-      }
       
       // @ts-ignore - puppeteer-extra extends puppeteer but types aren't perfect
       browser = await puppeteer.launch(launchOptions);
     } catch (launchError: any) {
-      // If launch fails due to executablePath, retry without it
+      // If launch fails, provide helpful error message
       if (
         launchError?.message?.includes("executablePath") ||
         launchError?.message?.includes("Browser was not found") ||
-        launchError?.message?.includes("Tried to find the browser")
+        launchError?.message?.includes("Tried to find the browser") ||
+        launchError?.message?.includes("/usr/bin/google-chrome")
       ) {
-        console.warn(
-          `⚠️  Browser launch failed with custom path, retrying with bundled Chromium...`
+        console.error(
+          `❌ Browser launch failed: ${launchError.message}`
         );
-        // Explicitly unset the env var to prevent Puppeteer from reading it
-        delete process.env.PUPPETEER_EXECUTABLE_PATH;
-        // @ts-ignore - puppeteer-extra extends puppeteer but types aren't perfect
-        browser = await puppeteer.launch({
-          headless: this.headless ? "new" : false,
-          args: [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-blink-features=AutomationControlled",
-            "--disable-dev-shm-usage",
-            "--disable-accelerated-2d-canvas",
-            "--no-first-run",
-            "--no-zygote",
-            "--disable-gpu",
-            "--window-size=1920,1080",
-            "--disable-features=IsolateOrigins,site-per-process",
-            "--disable-web-security",
-            "--disable-features=VizDisplayCompositor",
-          ],
-        });
+        console.error(
+          `💡 Make sure PUPPETEER_EXECUTABLE_PATH is NOT set in Railway environment variables`
+        );
+        console.error(
+          `💡 Puppeteer will use its bundled Chromium automatically`
+        );
+        throw new Error(
+          `Browser executable not found. Please remove PUPPETEER_EXECUTABLE_PATH from Railway environment variables to use bundled Chromium. Original error: ${launchError.message}`
+        );
       } else {
         throw launchError;
       }

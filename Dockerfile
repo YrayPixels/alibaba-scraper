@@ -44,10 +44,15 @@ RUN apt-get update || (sleep 5 && apt-get update) || (sleep 10 && apt-get update
 
 WORKDIR /app
 
+# Set environment variables BEFORE installing dependencies
+# This ensures Puppeteer downloads its bundled Chromium during npm install
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=false
+
 # Copy package files
 COPY package*.json ./
 
 # Install all dependencies (including dev dependencies for build)
+# Puppeteer will download Chromium here because PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=false
 RUN npm ci
 
 # Copy source files
@@ -59,21 +64,17 @@ RUN npm run build
 # Remove dev dependencies after build to reduce image size
 RUN npm prune --production
 
-# Expose port
-EXPOSE 3001
+# Expose port (Railway will set PORT env var automatically)
+EXPOSE 8080
 
-# Set environment variables
+# Set additional environment variables
 ENV NODE_ENV=production
-ENV PORT=3001
+# PORT will be set by Railway automatically, but provide a default
+ENV PORT=8080
 ENV PUPPETEER_HEADLESS=true
-# Ensure Puppeteer downloads its bundled Chromium (don't skip download)
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=false
 # IMPORTANT: Do NOT set PUPPETEER_EXECUTABLE_PATH here or in Railway
 # Puppeteer will use its bundled Chromium by default (recommended for Railway)
-# If PUPPETEER_EXECUTABLE_PATH is set in Railway's environment variables but
-# the path doesn't exist, the code will automatically unset it and use bundled Chromium
-# To use system Chrome, install it first in the Dockerfile and set the path:
-# RUN apt-get install -y chromium && ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+# If Railway has PUPPETEER_EXECUTABLE_PATH set, DELETE it from Railway's environment variables
 
 # Start the application
 CMD ["npm", "start"]
