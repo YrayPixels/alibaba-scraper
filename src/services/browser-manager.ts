@@ -117,6 +117,8 @@ class BrowserManager {
         console.warn(
           `⚠️  Chrome not found at ${executablePath}, using Puppeteer's bundled Chromium`
         );
+        // Explicitly unset the environment variable so Puppeteer doesn't try to use it
+        delete process.env.PUPPETEER_EXECUTABLE_PATH;
         executablePath = undefined;
       }
     } else {
@@ -126,8 +128,8 @@ class BrowserManager {
     // Launch browser with retry logic
     let browser: Browser;
     try {
-      // @ts-ignore - puppeteer-extra extends puppeteer but types aren't perfect
-      browser = await puppeteer.launch({
+      // Build launch options - only include executablePath if it's valid
+      const launchOptions: any = {
         headless: this.headless ? "new" : false,
         args: [
           "--no-sandbox",
@@ -143,17 +145,27 @@ class BrowserManager {
           "--disable-web-security", // Helps bypass some restrictions
           "--disable-features=VizDisplayCompositor",
         ],
-        ...(executablePath && { executablePath }),
-      });
+      };
+      
+      // Only add executablePath if it's valid and exists
+      if (executablePath) {
+        launchOptions.executablePath = executablePath;
+      }
+      
+      // @ts-ignore - puppeteer-extra extends puppeteer but types aren't perfect
+      browser = await puppeteer.launch(launchOptions);
     } catch (launchError: any) {
       // If launch fails due to executablePath, retry without it
       if (
         launchError?.message?.includes("executablePath") ||
-        launchError?.message?.includes("Browser was not found")
+        launchError?.message?.includes("Browser was not found") ||
+        launchError?.message?.includes("Tried to find the browser")
       ) {
         console.warn(
           `⚠️  Browser launch failed with custom path, retrying with bundled Chromium...`
         );
+        // Explicitly unset the env var to prevent Puppeteer from reading it
+        delete process.env.PUPPETEER_EXECUTABLE_PATH;
         // @ts-ignore - puppeteer-extra extends puppeteer but types aren't perfect
         browser = await puppeteer.launch({
           headless: this.headless ? "new" : false,

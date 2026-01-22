@@ -66,13 +66,14 @@ EXPOSE 3001
 ENV NODE_ENV=production
 ENV PORT=3001
 ENV PUPPETEER_HEADLESS=true
-# IMPORTANT: Do NOT set PUPPETEER_EXECUTABLE_PATH here
+# Ensure Puppeteer downloads its bundled Chromium (don't skip download)
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=false
+# IMPORTANT: Do NOT set PUPPETEER_EXECUTABLE_PATH here or in Railway
 # Puppeteer will use its bundled Chromium by default (recommended for Railway)
-# If you set PUPPETEER_EXECUTABLE_PATH in Railway's environment variables,
-# make sure Chrome/Chromium is actually installed at that path, otherwise
-# the code will automatically fall back to bundled Chromium
-# To use system Chrome, install it first and uncomment the line below:
-# ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+# If PUPPETEER_EXECUTABLE_PATH is set in Railway's environment variables but
+# the path doesn't exist, the code will automatically unset it and use bundled Chromium
+# To use system Chrome, install it first in the Dockerfile and set the path:
+# RUN apt-get install -y chromium && ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 # Start the application
 CMD ["npm", "start"]
