@@ -228,8 +228,8 @@ export async function scrapeWithBrowser(
       }
     });
 
-    page.on("pageerror", (error: Error) => {
-      const errorMsg = error.message;
+    page.on("pageerror", (error: unknown) => {
+      const errorMsg = error instanceof Error ? error.message : String(error);
       // Filter out common non-critical errors
       if (!errorMsg.includes("__name is not defined") && 
           !errorMsg.includes("MIME type") &&
