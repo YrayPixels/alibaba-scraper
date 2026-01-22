@@ -16,7 +16,12 @@ dotenv.config();
 
 console.log("🔧 Starting application...");
 console.log("🔧 NODE_ENV:", process.env.NODE_ENV || "not set");
-console.log("🔧 PORT:", process.env.PORT || "not set (will use 3001)");
+console.log("🔧 PORT:", process.env.PORT || "not set (will use 8080)");
+console.log("🔧 PROXY_URL:", process.env.PROXY_URL ? "✅ Set" : "❌ Not set");
+if (process.env.PROXY_URL) {
+  const parts = process.env.PROXY_URL.split(":");
+  console.log(`🔧 Proxy: ${parts[0]}:${parts[1]} (${parts.length >= 4 ? 'with auth' : 'no auth'})`);
+}
 
 // Initialize Redis cache
 initializeCache();

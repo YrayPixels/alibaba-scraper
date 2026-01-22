@@ -31,11 +31,19 @@ puppeteer.use(
  * Browser Manager - Maintains a persistent browser instance
  * Reusing the same browser helps avoid captchas by maintaining session/cookies
  */
+interface ProxyConfig {
+  host: string;
+  port: number;
+  username?: string;
+  password?: string;
+}
+
 class BrowserManager {
   private browser: Browser | null = null;
   private isLaunching = false;
   private launchPromise: Promise<Browser> | null = null;
   private headless: boolean | "new";
+  private proxyConfig: ProxyConfig | null = null;
 
   constructor() {
     // Determine headless mode - default to visible in development
@@ -50,6 +58,68 @@ class BrowserManager {
         `⚠️  PUPPETEER_EXECUTABLE_PATH is set but will be ignored. Using bundled Chromium.`
       );
     }
+
+    // Parse proxy configuration from environment variables
+    this.proxyConfig = this.parseProxyConfig();
+
+    // Log proxy status at initialization
+    if (this.proxyConfig) {
+      console.log(`✅ Proxy configured: ${this.proxyConfig.host}:${this.proxyConfig.port}`);
+    } else {
+      console.log(`ℹ️  No proxy configured - using direct connection`);
+    }
+  }
+
+  /**
+   * Parse proxy configuration from environment variables
+   * Supports formats:
+   * - PROXY_URL=host:port:username:password
+   * - PROXY_HOST, PROXY_PORT, PROXY_USERNAME, PROXY_PASSWORD (separate vars)
+   */
+  private parseProxyConfig(): ProxyConfig | null {
+    // Try PROXY_URL format first (host:port:username:password)
+    const proxyUrl = process.env.PROXY_URL;
+    if (proxyUrl) {
+      console.log(`🔍 Found PROXY_URL environment variable`);
+      const parts = proxyUrl.split(":");
+      console.log(`🔍 Split into ${parts.length} parts:`, parts.map((p, i) => `[${i}]=${p.substring(0, 20)}...`).join(", "));
+
+      if (parts.length >= 2) {
+        const host = parts[0];
+        const port = parseInt(parts[1], 10);
+        const username = parts[2] || undefined;
+        const password = parts[3] || undefined;
+
+        if (host && !isNaN(port)) {
+          console.log(`✅ Parsed proxy config: ${host}:${port} (username: ${username ? 'yes' : 'no'}, password: ${password ? 'yes' : 'no'})`);
+          return { host, port, username, password };
+        } else {
+          console.warn(`⚠️  Invalid proxy config: host=${host}, port=${port} (isNaN: ${isNaN(port)})`);
+        }
+      } else {
+        console.warn(`⚠️  PROXY_URL format invalid: expected host:port:username:password, got ${parts.length} parts`);
+      }
+    }
+
+    // Try separate environment variables
+    const host = process.env.PROXY_HOST;
+    const portStr = process.env.PROXY_PORT;
+    const username = process.env.PROXY_USERNAME;
+    const password = process.env.PROXY_PASSWORD;
+
+    if (host && portStr) {
+      console.log(`🔍 Found separate proxy env vars: PROXY_HOST=${host}, PROXY_PORT=${portStr}`);
+      const port = parseInt(portStr, 10);
+      if (!isNaN(port)) {
+        console.log(`✅ Parsed proxy config from separate vars: ${host}:${port} (username: ${username ? 'yes' : 'no'}, password: ${password ? 'yes' : 'no'})`);
+        return { host, port, username, password };
+      } else {
+        console.warn(`⚠️  Invalid PROXY_PORT: ${portStr} is not a number`);
+      }
+    }
+
+    console.log(`ℹ️  No proxy configuration found. Set PROXY_URL or PROXY_HOST/PROXY_PORT to use a proxy.`);
+    return null;
   }
 
   /**
@@ -123,20 +193,38 @@ class BrowserManager {
       );
       delete process.env.PUPPETEER_EXECUTABLE_PATH;
     }
-    
+
+    // Configure proxy if available
+    const args = [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--no-zygote",
+      "--single-process",
+    ];
+
+    if (this.proxyConfig) {
+      const proxyServer = `${this.proxyConfig.host}:${this.proxyConfig.port}`;
+      args.push(`--proxy-server=${proxyServer}`);
+      // Ignore certificate errors when using proxy (proxy may use self-signed certs)
+      args.push("--ignore-certificate-errors");
+      args.push("--ignore-certificate-errors-spki-list");
+      console.log(`🌐 Using residential proxy: ${this.proxyConfig.host}:${this.proxyConfig.port}`);
+      if (this.proxyConfig.username) {
+        console.log(`🔐 Proxy authentication enabled`);
+      }
+      console.log(`🔒 SSL certificate validation disabled for proxy`);
+    } else {
+      console.log(`🌐 No proxy configured, using direct connection`);
+    }
+
     try {
       // Use Railway-optimized launch config (from guide)
       // This ensures Puppeteer uses its bundled Chromium, not system Chrome
       const launchOptions: any = {
         headless: this.headless ? "new" : false,
-        args: [
-          "--no-sandbox",
-          "--disable-setuid-sandbox",
-          "--disable-dev-shm-usage",
-          "--disable-gpu",
-          "--no-zygote",
-          "--single-process",
-        ],
+        args,
       };
       
       // @ts-ignore - puppeteer-extra extends puppeteer but types aren't perfect
@@ -172,8 +260,19 @@ class BrowserManager {
       this.browser = null;
     });
 
+    // Set proxy authentication if credentials are provided
+    // Note: Authentication must be set per page, not per browser
+    // We'll handle this in the page creation (browser-scraper.ts)
+
     console.log("✅ Browser instance created and ready");
     return browser;
+  }
+
+  /**
+   * Get proxy configuration (for use in page authentication)
+   */
+  getProxyConfig(): ProxyConfig | null {
+    return this.proxyConfig;
   }
 
   /**

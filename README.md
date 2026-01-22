@@ -49,6 +49,16 @@ PUPPETEER_HEADLESS=true
 # PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
 USE_BROWSER_SCRAPING=true
 
+# Residential Proxy Configuration (Optional)
+# Format: host:port:username:password
+PROXY_URL=brd.superproxy.io:33335:brd-customer-hl_85ed761a-zone-alibaba:qbg3s252npg7
+
+# OR use separate environment variables:
+# PROXY_HOST=brd.superproxy.io
+# PROXY_PORT=33335
+# PROXY_USERNAME=brd-customer-hl_85ed761a-zone-alibaba
+# PROXY_PASSWORD=qbg3s252npg7
+
 # Redis Cache Configuration (optional)
 # Option 1: Use Redis URL (recommended for cloud providers)
 REDIS_URL=redis://localhost:6379

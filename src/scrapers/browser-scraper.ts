@@ -82,6 +82,16 @@ export async function scrapeWithBrowser(
   try {
     page = await browser.newPage();
 
+    // Set proxy authentication if configured
+    const proxyConfig = browserManager.getProxyConfig();
+    if (proxyConfig && proxyConfig.username && proxyConfig.password) {
+      await page.authenticate({
+        username: proxyConfig.username,
+        password: proxyConfig.password,
+      });
+      console.log("🔐 Proxy authentication set for this page");
+    }
+
     // Set realistic viewport
     await page.setViewport(finalConfig.viewport!);
 
@@ -148,19 +158,6 @@ export async function scrapeWithBrowser(
         app: {}
       };
     });
-    
-    // Visit a neutral page first to establish browsing history (helps avoid detection)
-    console.log("🌐 Establishing browsing session...");
-    try {
-      await page.goto("https://www.google.com", {
-        waitUntil: "domcontentloaded",
-        timeout: 10000,
-      });
-      await new Promise((resolve) => setTimeout(resolve, 2000));
-      console.log("✅ Browsing session established");
-    } catch (error) {
-      console.warn("⚠️  Could not establish browsing session, continuing anyway:", error);
-    }
 
     // Set extra headers
     await page.setExtraHTTPHeaders({
@@ -173,27 +170,26 @@ export async function scrapeWithBrowser(
       "Upgrade-Insecure-Requests": "1",
     });
 
-    // Block unnecessary resources to speed up loading (but keep some for realism)
-    // Only block in production, allow everything in development for debugging
-    if (process.env.NODE_ENV === "production") {
+    // Block unnecessary resources to speed up loading
+    // We block images, fonts, and media but allow CSS (needed for page stability)
+    // The scraper reads image URLs from src, data-src, data-lazy, and style attributes
     await page.setRequestInterception(true);
-      page.on("request", (request: HTTPRequest) => {
+    page.on("request", (request: HTTPRequest) => {
       const resourceType = request.resourceType();
-        const url = request.url();
-        
-        // Block images, fonts, and media to speed up
-        // But allow some images that might be needed for page structure
-        if (["font", "media"].includes(resourceType)) {
-          request.abort();
-        } else if (resourceType === "image" && !url.includes("logo") && !url.includes("icon")) {
+      const url = request.url();
+      
+      // Always allow: document (HTML), script (JS), xhr (API calls), fetch (API calls), stylesheet (CSS)
+      // Block: images, fonts, media (we extract image URLs from HTML instead)
+      // Note: We allow CSS to prevent page crashes from missing styles
+      if (["image", "font", "media"].includes(resourceType)) {
         request.abort();
       } else {
+        // Allow HTML, JavaScript, CSS, API calls, and other essential resources
         request.continue();
       }
     });
-    } else {
-      console.log("🔓 Development mode: Allowing all resources for debugging");
-    }
+    
+    console.log("⚡ Resource blocking enabled: Images, fonts, and media blocked (URLs extracted from HTML, CSS allowed for stability)");
 
     console.log("📄 Navigating to Alibaba product page...");
     
@@ -215,6 +211,19 @@ export async function scrapeWithBrowser(
         "fourier.taobao.com",
         "px.effirst.com",
         "report?x5secdata",
+        "CORS policy", // Filter CORS errors (common with proxies)
+        "Access-Control-Allow-Origin", // CORS header errors
+        "preflight request", // CORS preflight errors
+        "g.alicdn.com", // Alibaba CDN resources (often fail through proxies)
+        "Failed to load resource", // Generic resource load failures (common with proxies)
+        "Residential Failed", // Proxy errors (402 status)
+        "bad_endpoint", // Proxy endpoint errors
+        "402", // Proxy payment/endpoint errors
+        "JSHandle@error", // Generic JS errors
+        "获取物流信息失败", // Chinese error messages
+        "login.alibaba.com", // Login service failures
+        "insights.alibaba.com", // Analytics failures
+        "video.alibaba.com", // Video service failures
       ];
       
       const shouldIgnore = ignorePatterns.some(pattern => text.includes(pattern));
@@ -251,6 +260,13 @@ export async function scrapeWithBrowser(
         ".css",
         ".woff",
         ".woff2",
+        "g.alicdn.com", // Alibaba CDN resources (often fail through proxies)
+        "alicdn.com", // Alibaba CDN
+        "login.alibaba.com", // Login service (not needed for scraping)
+        "insights.alibaba.com", // Analytics (not needed)
+        "video.alibaba.com", // Video service (not needed)
+        "getEnvironment.do", // Environment checks (not needed)
+        "gatewayService", // Gateway services (not needed)
       ];
       
       const shouldIgnore = ignorePatterns.some(pattern => url.includes(pattern));
@@ -261,9 +277,11 @@ export async function scrapeWithBrowser(
     });
 
     // Navigate to the page
+    // Use "domcontentloaded" instead of "networkidle2" since many resources fail through proxy
+    // This ensures we get the page content even if some resources fail to load
     try {
       const response = await page.goto(url, {
-        waitUntil: "networkidle2", // Wait for network to be mostly idle (max 2 connections)
+        waitUntil: "domcontentloaded", // Wait for DOM to be ready (faster, works even if resources fail)
         timeout: finalConfig.timeout,
       });
       
@@ -275,6 +293,11 @@ export async function scrapeWithBrowser(
       if (!response || !response.ok()) {
         console.warn(`⚠️  Response not OK: ${response?.status()} ${response?.statusText()}`);
       }
+      
+      // Wait for JavaScript to execute and render content
+      // Since we're using domcontentloaded (faster), we need to wait a bit for JS to run
+      console.log("⏳ Waiting for JavaScript to render content...");
+      await new Promise((resolve) => setTimeout(resolve, 3000)); // Wait 3 seconds for JS execution
       
       // Wait for page to start loading content before checking for captcha
       // Don't check immediately - page might be empty while JavaScript loads
@@ -310,7 +333,14 @@ export async function scrapeWithBrowser(
     console.log(`📝 Page body text length: ${bodyText.length} characters`);
     
     // Check for captcha now that we've waited for content
-    const captchaCheck = await page.evaluate(() => {
+    // Verify page is still connected
+    if (page.isClosed() || !browser.isConnected()) {
+      throw new Error("Page or browser disconnected before captcha check");
+    }
+    
+    let captchaCheck: any;
+    try {
+      captchaCheck = await page.evaluate(() => {
       const bodyText = document.body?.innerText?.toLowerCase() || "";
       const html = document.documentElement.innerHTML.toLowerCase();
       return {
@@ -323,7 +353,13 @@ export async function scrapeWithBrowser(
                      document.querySelector("[id*='captcha']") !== null,
         bodyLength: bodyText.length,
       };
-    });
+      });
+    } catch (error: any) {
+      if (error.message?.includes("detached") || error.message?.includes("closed")) {
+        throw new Error("Page was closed or detached during captcha check");
+      }
+      throw error;
+    }
     
     if (captchaCheck.hasCaptchaText || captchaCheck.hasRecaptcha) {
       console.error("🚫 CAPTCHA DETECTED!");

@@ -529,7 +529,12 @@ export class AlibabaScraper {
 
     for (const selector of mainImageSelectors) {
       const element = $(selector).first();
-      const src = element.attr("src") || element.attr("data-src");
+      // Check multiple attributes for image URLs (including lazy-loading attributes)
+      const src = element.attr("src") || 
+                  element.attr("data-src") || 
+                  element.attr("data-lazy") ||
+                  element.attr("data-original") ||
+                  element.attr("data-url");
       if (src) {
         mainImage = this.normalizeImageUrl(src);
         break;
@@ -548,10 +553,13 @@ export class AlibabaScraper {
 
     imageSelectors.forEach((selector) => {
       $(selector).each((_, el) => {
+        // Check multiple attributes for image URLs (including lazy-loading attributes)
         const src =
           $(el).attr("src") ||
           $(el).attr("data-src") ||
-          $(el).attr("data-lazy");
+          $(el).attr("data-lazy") ||
+          $(el).attr("data-original") ||
+          $(el).attr("data-url");
         if (src) {
           const normalizedUrl = this.normalizeImageUrl(src);
           if (normalizedUrl && !images.includes(normalizedUrl)) {
@@ -564,7 +572,12 @@ export class AlibabaScraper {
     // If no images found, try all images on page
     if (images.length === 0) {
       $("img").each((_, el) => {
-        const src = $(el).attr("src") || $(el).attr("data-src");
+        // Check multiple attributes for image URLs
+        const src = $(el).attr("src") || 
+                    $(el).attr("data-src") || 
+                    $(el).attr("data-lazy") ||
+                    $(el).attr("data-original") ||
+                    $(el).attr("data-url");
         if (
           src &&
           (src.includes("alicdn.com") || src.includes("alibaba.com")) &&
