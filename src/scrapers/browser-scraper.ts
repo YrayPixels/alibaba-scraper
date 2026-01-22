@@ -1,5 +1,7 @@
-import puppeteer from "puppeteer";
 import { AlibabaScraper, AlibabaProduct } from "./alibaba-scraper.js";
+import type { HTTPRequest, ConsoleMessage } from "puppeteer";
+import { createCaptchaSolver } from "../services/captcha-solver.js";
+import { getBrowserManager } from "../services/browser-manager.js";
 
 /**
  * Configuration for browser scraping
@@ -15,7 +17,10 @@ interface BrowserConfig {
 }
 
 const DEFAULT_CONFIG: BrowserConfig = {
-  headless: process.env.PUPPETEER_HEADLESS !== "false",
+  // Default to non-headless in development, headless in production
+  headless: process.env.NODE_ENV === "production" 
+    ? process.env.PUPPETEER_HEADLESS !== "false"
+    : process.env.PUPPETEER_HEADLESS === "true",
   timeout: 45000, // 45 seconds
   waitForSelector: "h1",
   viewport: {
@@ -57,37 +62,20 @@ export async function scrapeWithBrowser(
   // Normalize URL (add protocol if missing)
   url = normalizeUrl(url);
 
-  console.log(`🚀 Launching browser for: ${url}`);
+  console.log(`🌐 Scraping: ${url}`);
+  console.log(`♻️  Using persistent browser instance (reused across requests)`);
 
-  // Use Puppeteer's bundled Chromium (no need to specify executablePath)
-  // If PUPPETEER_EXECUTABLE_PATH is set, use it (for custom Chrome installations)
-  // But check if the file exists first, otherwise fall back to bundled Chromium
-  let executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
-  
-  // Check if executable path exists (if provided)
-  if (executablePath) {
-    try {
-      const fs = await import("fs/promises");
-      await fs.access(executablePath);
-      console.log(`📍 Using Chrome at: ${executablePath}`);
-    } catch {
-      console.warn(`⚠️  Chrome not found at ${executablePath}, using Puppeteer's bundled Chromium`);
-      executablePath = undefined;
-    }
-  } else {
-    console.log(`📍 Using Puppeteer's bundled Chromium`);
+  // Get the persistent browser instance (reused across requests)
+  // Pass headless config to ensure browser is created with correct visibility
+  const browserManager = getBrowserManager();
+  const headlessMode = finalConfig.headless ? "new" : false;
+  let browser;
+  try {
+    browser = await browserManager.getBrowser(headlessMode);
+  } catch (error) {
+    console.error("❌ Failed to get browser instance:", error);
+    throw error;
   }
-
-  const browser = await puppeteer.launch({
-    headless: finalConfig.headless,
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-blink-features=AutomationControlled",
-      "--window-size=1920,1080",
-    ],
-    ...(executablePath && { executablePath }),
-  });
 
   let page;
 
@@ -97,10 +85,82 @@ export async function scrapeWithBrowser(
     // Set realistic viewport
     await page.setViewport(finalConfig.viewport!);
 
-    // Set realistic user agent
+    // Set realistic user agent (updated to match current Chrome version)
     await page.setUserAgent(
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     );
+    
+    // Enhanced fingerprinting overrides
+    await page.evaluateOnNewDocument(() => {
+      // Override webdriver property
+      Object.defineProperty(navigator, "webdriver", {
+        get: () => false,
+      });
+      
+      // Override plugins to look more realistic
+      Object.defineProperty(navigator, "plugins", {
+        get: () => {
+          return [
+            {
+              0: { type: "application/x-google-chrome-pdf", suffixes: "pdf", description: "Portable Document Format" },
+              description: "Portable Document Format",
+              filename: "internal-pdf-viewer",
+              length: 1,
+              name: "Chrome PDF Plugin"
+            },
+            {
+              0: { type: "application/pdf", suffixes: "pdf", description: "" },
+              description: "",
+              filename: "mhjfbmdgcfjbbpaeojofohoefgiehjai",
+              length: 1,
+              name: "Chrome PDF Viewer"
+            },
+            {
+              0: { type: "application/x-nacl", suffixes: "", description: "Native Client Executable" },
+              1: { type: "application/x-pnacl", suffixes: "", description: "Portable Native Client Executable" },
+              description: "",
+              filename: "internal-nacl-plugin",
+              length: 2,
+              name: "Native Client"
+            }
+          ];
+        },
+      });
+      
+      // Override languages
+      Object.defineProperty(navigator, "languages", {
+        get: () => ["en-US", "en"],
+      });
+      
+      // Override permissions
+      const originalQuery = window.navigator.permissions.query;
+      window.navigator.permissions.query = (parameters: any) => (
+        parameters.name === "notifications" ?
+          Promise.resolve({ state: Notification.permission } as PermissionStatus) :
+          originalQuery(parameters)
+      );
+      
+      // Override chrome object
+      (window as any).chrome = {
+        runtime: {},
+        loadTimes: function() {},
+        csi: function() {},
+        app: {}
+      };
+    });
+    
+    // Visit a neutral page first to establish browsing history (helps avoid detection)
+    console.log("🌐 Establishing browsing session...");
+    try {
+      await page.goto("https://www.google.com", {
+        waitUntil: "domcontentloaded",
+        timeout: 10000,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      console.log("✅ Browsing session established");
+    } catch (error) {
+      console.warn("⚠️  Could not establish browsing session, continuing anyway:", error);
+    }
 
     // Set extra headers
     await page.setExtraHTTPHeaders({
@@ -113,55 +173,442 @@ export async function scrapeWithBrowser(
       "Upgrade-Insecure-Requests": "1",
     });
 
-    // Block unnecessary resources to speed up loading
+    // Block unnecessary resources to speed up loading (but keep some for realism)
+    // Only block in production, allow everything in development for debugging
+    if (process.env.NODE_ENV === "production") {
     await page.setRequestInterception(true);
-    page.on("request", (request) => {
+      page.on("request", (request: HTTPRequest) => {
       const resourceType = request.resourceType();
-      // Block images, fonts, and some other resources to speed up
-      if (["image", "font", "media"].includes(resourceType)) {
+        const url = request.url();
+        
+        // Block images, fonts, and media to speed up
+        // But allow some images that might be needed for page structure
+        if (["font", "media"].includes(resourceType)) {
+          request.abort();
+        } else if (resourceType === "image" && !url.includes("logo") && !url.includes("icon")) {
         request.abort();
       } else {
         request.continue();
       }
     });
+    } else {
+      console.log("🔓 Development mode: Allowing all resources for debugging");
+    }
 
-    console.log("📄 Navigating to page...");
+    console.log("📄 Navigating to Alibaba product page...");
+    
+    // Add a small delay to simulate human behavior
+    await new Promise((resolve) => setTimeout(resolve, 1000 + Math.random() * 2000));
+
+    // Listen to console messages and network errors (filter out common non-critical errors)
+    page.on("console", (msg: ConsoleMessage) => {
+      const type = msg.type();
+      const text = msg.text();
+      
+      // Filter out common Alibaba tracking/analytics errors that don't affect content
+      const ignorePatterns = [
+        "__name is not defined",
+        "MIME type",
+        "indexedDB",
+        "FedCM",
+        "identity provider",
+        "fourier.taobao.com",
+        "px.effirst.com",
+        "report?x5secdata",
+      ];
+      
+      const shouldIgnore = ignorePatterns.some(pattern => text.includes(pattern));
+      
+      if (!shouldIgnore) {
+        if (type === "error") {
+          console.error(`🌐 Browser console error: ${text}`);
+        } else if (type === "warn") {
+          console.warn(`🌐 Browser console warning: ${text}`);
+        }
+      }
+    });
+
+    page.on("pageerror", (error: Error) => {
+      const errorMsg = error.message;
+      // Filter out common non-critical errors
+      if (!errorMsg.includes("__name is not defined") && 
+          !errorMsg.includes("MIME type") &&
+          !errorMsg.includes("indexedDB")) {
+        console.error(`🌐 Page error: ${errorMsg}`);
+      }
+    });
+
+    page.on("requestfailed", (request: HTTPRequest) => {
+      const url = request.url();
+      // Only log important failures, ignore tracking/analytics failures
+      const ignorePatterns = [
+        "fourier.taobao.com",
+        "px.effirst.com",
+        "report?x5secdata",
+        ".png",
+        ".jpg",
+        ".gif",
+        ".css",
+        ".woff",
+        ".woff2",
+      ];
+      
+      const shouldIgnore = ignorePatterns.some(pattern => url.includes(pattern));
+      
+      if (!shouldIgnore) {
+        console.error(`🌐 Request failed: ${url} - ${request.failure()?.errorText}`);
+      }
+    });
 
     // Navigate to the page
-    await page.goto(url, {
-      waitUntil: "domcontentloaded",
-      timeout: finalConfig.timeout,
+    try {
+      const response = await page.goto(url, {
+        waitUntil: "networkidle2", // Wait for network to be mostly idle (max 2 connections)
+        timeout: finalConfig.timeout,
+      });
+      
+      console.log(`✅ Navigation response status: ${response?.status()}`);
+      console.log(`📍 Current URL: ${page.url()}`);
+      const initialTitle = await page.title();
+      console.log(`📄 Page title: ${initialTitle}`);
+      
+      if (!response || !response.ok()) {
+        console.warn(`⚠️  Response not OK: ${response?.status()} ${response?.statusText()}`);
+      }
+      
+      // Wait for page to start loading content before checking for captcha
+      // Don't check immediately - page might be empty while JavaScript loads
+      console.log("⏳ Waiting for page content to load...");
+      
+      // Try to wait for any content to appear (with longer timeout for Alibaba's heavy JS)
+      try {
+        await page.waitForFunction(
+          () => {
+            const body = document.body;
+            if (!body) return false;
+            const text = body.innerText || "";
+            // Wait for meaningful content (not just whitespace)
+            return text.trim().length > 50;
+          },
+          { timeout: 15000 } // Increased timeout for Alibaba's heavy pages
+        );
+        console.log("✅ Page content started loading");
+      } catch (error) {
+        console.warn("⚠️  Timeout waiting for page content, continuing anyway...");
+      }
+      
+      // Additional wait for JavaScript to execute and render
+      console.log("⏳ Waiting for JavaScript to render content...");
+      await new Promise((resolve) => setTimeout(resolve, 5000)); // Increased wait time
+    } catch (error) {
+      console.error(`❌ Navigation error:`, error);
+      throw error;
+    }
+    
+    // Check if page actually loaded content
+    const bodyText = await page.evaluate(() => document.body?.innerText || "");
+    console.log(`📝 Page body text length: ${bodyText.length} characters`);
+    
+    // Check for captcha now that we've waited for content
+    const captchaCheck = await page.evaluate(() => {
+      const bodyText = document.body?.innerText?.toLowerCase() || "";
+      const html = document.documentElement.innerHTML.toLowerCase();
+      return {
+        hasCaptchaText: bodyText.includes("captcha") || html.includes("captcha") || 
+                        bodyText.includes("verify you are human") || html.includes("verify you are human") ||
+                        bodyText.includes("security check") || html.includes("security check") ||
+                        bodyText.includes("unusual traffic") || html.includes("unusual traffic"),
+        hasRecaptcha: document.querySelector("iframe[src*='recaptcha']") !== null ||
+                     document.querySelector(".g-recaptcha") !== null ||
+                     document.querySelector("[id*='captcha']") !== null,
+        bodyLength: bodyText.length,
+      };
     });
+    
+    if (captchaCheck.hasCaptchaText || captchaCheck.hasRecaptcha) {
+      console.error("🚫 CAPTCHA DETECTED!");
+      console.error(`   Body text length: ${captchaCheck.bodyLength}`);
+      console.error(`   Has captcha text: ${captchaCheck.hasCaptchaText}`);
+      console.error(`   Has recaptcha element: ${captchaCheck.hasRecaptcha}`);
+      
+      // Try automatic captcha solving first (if configured)
+      const captchaSolver = createCaptchaSolver();
+      if (captchaSolver) {
+        console.log("🤖 Attempting automatic captcha solving...");
+        try {
+          // Alibaba uses a custom slider captcha - try to solve it
+          // Note: Standard services may not support Alibaba's custom captcha
+          // You may need a specialized service or manual solving
+          const solveResult = await captchaSolver.solveSliderCaptcha(url);
+          
+          if (solveResult.success && solveResult.token) {
+            console.log("✅ Captcha solved automatically! Injecting token...");
+            // Inject the token into the page
+            await page.evaluate((token: string) => {
+              // Try to find and fill captcha token field
+              const tokenInput = document.querySelector('input[name="captcha-token"]') as HTMLInputElement;
+              if (tokenInput) {
+                tokenInput.value = token;
+              }
+              // Trigger any submit events
+              const event = new Event('input', { bubbles: true });
+              if (tokenInput) {
+                tokenInput.dispatchEvent(event);
+              }
+            }, solveResult.token);
+            
+            // Wait for page to process
+            await new Promise((resolve) => setTimeout(resolve, 3000));
+            
+            // Re-check if captcha is gone
+            const recheck = await page.evaluate(() => {
+              const bodyText = document.body?.innerText?.toLowerCase() || "";
+              return !bodyText.includes("unusual traffic") && !bodyText.includes("verify");
+            });
+            
+            if (recheck) {
+              console.log("✅ Captcha solved successfully! Continuing...");
+              // Continue with scraping
+            } else {
+              console.warn("⚠️  Captcha token injected but page still shows captcha");
+              throw new Error("Automatic captcha solving did not work - page still shows captcha");
+            }
+          } else {
+            console.warn(`⚠️  Automatic captcha solving failed: ${solveResult.error}`);
+            throw new Error(`Captcha solving failed: ${solveResult.error}`);
+          }
+        } catch (error) {
+          console.error("❌ Automatic captcha solving error:", error);
+          // Fall through to manual solving or error
+        }
+      }
+      
+      // If automatic solving didn't work or isn't configured, try manual solving
+      // If in development mode and browser is visible, wait for manual captcha solving
+      if (!finalConfig.headless && process.env.NODE_ENV === "development") {
+        console.log("⏸️  MANUAL CAPTCHA MODE: Browser is visible - please solve the captcha manually");
+        console.log("⏸️  Waiting up to 120 seconds for you to solve the captcha...");
+        console.log("⏸️  The scraper will continue automatically once the captcha is solved and page loads");
+        
+        // Wait for captcha to be solved (check if page content changes)
+        const maxWaitTime = 120000; // 2 minutes
+        const checkInterval = 2000; // Check every 2 seconds
+        const startTime = Date.now();
+        
+        while (Date.now() - startTime < maxWaitTime) {
+          await new Promise((resolve) => setTimeout(resolve, checkInterval));
+          
+          // Check if captcha is gone and content has loaded
+          const currentCheck = await page.evaluate(() => {
+            const bodyText = document.body?.innerText?.toLowerCase() || "";
+            const html = document.documentElement.innerHTML.toLowerCase();
+            return {
+              stillHasCaptcha: bodyText.includes("unusual traffic") || 
+                              bodyText.includes("verify") ||
+                              html.includes("unusual traffic"),
+              hasContent: bodyText.length > 200, // Meaningful content loaded
+            };
+          });
+          
+          if (!currentCheck.stillHasCaptcha && currentCheck.hasContent) {
+            console.log("✅ Captcha appears to be solved! Continuing...");
+            // Wait a bit more for page to fully load
     await new Promise((resolve) => setTimeout(resolve, 3000));
+            break;
+          }
+        }
+        
+        // Final check
+        const finalCheck = await page.evaluate(() => {
+          const bodyText = document.body?.innerText?.toLowerCase() || "";
+          return {
+            stillHasCaptcha: bodyText.includes("unusual traffic") || bodyText.includes("verify"),
+            bodyLength: bodyText.length,
+          };
+        });
+        
+        if (finalCheck.stillHasCaptcha) {
+          throw new Error(
+            "Captcha was not solved within the timeout period. Please try again."
+          );
+        }
+        
+        console.log("✅ Continuing after captcha was solved");
+      } else {
+        throw new Error(
+          "Page is protected by captcha or access control. Alibaba is blocking automated access. " +
+          "Set NODE_ENV=development and headless=false to enable manual captcha solving."
+        );
+      }
+    }
+    
+    if (bodyText.length < 100) {
+      console.warn("⚠️  Page seems to have very little content, might be blocked or still loading");
+      // Wait a bit more for dynamic content
+      console.log("⏳ Waiting additional time for dynamic content...");
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+      
+      // Re-check body length
+      const newBodyText = await page.evaluate(() => document.body?.innerText || "");
+      console.log(`📝 Page body text length after wait: ${newBodyText.length} characters`);
+      
+      if (newBodyText.length < 100) {
+        console.warn("⚠️  Page still has very little content after waiting");
+      }
+    }
 
-    await page.mouse.move(200, 200);
-    await page.mouse.wheel({ deltaY: 600 });
-    await new Promise((resolve) => setTimeout(resolve, 3000));
+    // Simulate human-like behavior
+    console.log("🖱️  Simulating human behavior...");
+    await page.mouse.move(Math.random() * 500 + 100, Math.random() * 500 + 100);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    
+    // Scroll down slowly like a human
+    await page.evaluate(() => {
+      window.scrollBy(0, 300);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    
+    await page.evaluate(() => {
+      window.scrollBy(0, 300);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 1000));
 
     console.log("⏳ Waiting for content to load...");
 
-    // Wait for the main content to load
-    try {
-      await page.waitForSelector(finalConfig.waitForSelector!, {
-        timeout: 10000,
-      });
-    } catch (error) {
-      console.warn("Timeout waiting for selector, continuing anyway...");
+    // Wait for the main content to load - try multiple selectors
+    const selectors = [
+      "h1",
+      "[data-product-title]",
+      ".product-title",
+      ".product-name",
+      "title",
+    ];
+    
+    let foundSelector = false;
+    for (const selector of selectors) {
+      try {
+        await page.waitForSelector(selector, {
+          timeout: 5000,
+        });
+        foundSelector = true;
+        console.log(`✅ Found selector: ${selector}`);
+        break;
+      } catch {
+        // Continue to next selector
+      }
+    }
+    
+    if (!foundSelector) {
+      console.warn("⚠️  Could not find any expected selectors, checking page content...");
     }
 
     // Additional wait to ensure dynamic content loads
     await new Promise((resolve) => setTimeout(resolve, 2000));
 
-    // Check if we hit a captcha or access denied page
-    const pageContent = await page.content();
-    if (
-      pageContent.includes("captcha") ||
-      pageContent.includes("Access Denied") ||
-      pageContent.includes("Blocked")
-    ) {
-      throw new Error(
-        "Page is protected by captcha or access control. Please try again later."
+    // Log final page state for debugging
+    const finalUrl = page.url();
+    const finalTitle = await page.title();
+    console.log(`🔍 Final page state:`);
+    console.log(`   URL: ${finalUrl}`);
+    console.log(`   Title: ${finalTitle}`);
+    
+    // Final check if we hit a captcha or access denied page (more accurate detection)
+    const pageContent = (await page.content()).toLowerCase();
+    const pageTitle = finalTitle.toLowerCase();
+    const pageUrl = finalUrl.toLowerCase();
+    
+    // Check for actual captcha indicators (case-insensitive)
+    const captchaIndicators = [
+      "captcha",
+      "verify you are human",
+      "verify that you are not a robot",
+      "access denied",
+      "blocked",
+      "security check",
+      "unusual traffic",
+      "please complete the security check",
+      "challenge",
+    ];
+    
+    const hasCaptcha = captchaIndicators.some(
+      (indicator) =>
+        pageContent.includes(indicator) ||
+        pageTitle.includes(indicator) ||
+        pageUrl.includes(indicator)
+    );
+    
+    // Also check for common captcha elements
+    const captchaElements = await page.evaluate(() => {
+      return (
+        document.querySelector("iframe[src*='recaptcha']") !== null ||
+        document.querySelector(".g-recaptcha") !== null ||
+        document.querySelector("[id*='captcha']") !== null ||
+        document.querySelector("[class*='captcha']") !== null ||
+        document.querySelector("[id*='challenge']") !== null ||
+        document.querySelector("[class*='challenge']") !== null ||
+        document.querySelector("iframe[src*='challenge']") !== null
       );
+    });
+    
+    if (hasCaptcha || captchaElements) {
+      console.error("🚫 CAPTCHA DETECTED on final check!");
+      console.error(`   Page URL: ${finalUrl}`);
+      console.error(`   Page Title: ${finalTitle}`);
+      console.error(`   Body text length: ${bodyText.length}`);
+      console.error(`   Has captcha text: ${hasCaptcha}`);
+      console.error(`   Has captcha elements: ${captchaElements}`);
+      
+      // If in development mode and browser is visible, wait for manual captcha solving
+      if (!finalConfig.headless && process.env.NODE_ENV === "development") {
+        console.log("⏸️  MANUAL CAPTCHA MODE: Browser is visible - please solve the captcha manually");
+        console.log("⏸️  Waiting up to 120 seconds for you to solve the captcha...");
+        
+        const maxWaitTime = 120000; // 2 minutes
+        const checkInterval = 2000; // Check every 2 seconds
+        const startTime = Date.now();
+        
+        while (Date.now() - startTime < maxWaitTime) {
+          await new Promise((resolve) => setTimeout(resolve, checkInterval));
+          
+          const currentCheck = await page.evaluate(() => {
+            const bodyText = document.body?.innerText?.toLowerCase() || "";
+            const html = document.documentElement.innerHTML.toLowerCase();
+            return {
+              stillHasCaptcha: bodyText.includes("unusual traffic") || 
+                              bodyText.includes("verify") ||
+                              html.includes("unusual traffic"),
+              hasContent: bodyText.length > 200,
+            };
+          });
+          
+          if (!currentCheck.stillHasCaptcha && currentCheck.hasContent) {
+            console.log("✅ Captcha appears to be solved! Continuing...");
+            await new Promise((resolve) => setTimeout(resolve, 3000));
+            break;
+          }
+        }
+        
+        const finalCheck = await page.evaluate(() => {
+          const bodyText = document.body?.innerText?.toLowerCase() || "";
+          return {
+            stillHasCaptcha: bodyText.includes("unusual traffic") || bodyText.includes("verify"),
+            bodyLength: bodyText.length,
+          };
+        });
+        
+        if (finalCheck.stillHasCaptcha) {
+          throw new Error(
+            "Captcha was not solved within the timeout period. Please try again."
+          );
+        }
+        
+        console.log("✅ Continuing after captcha was solved");
+      } else {
+        throw new Error(
+          "Page is protected by captcha or access control. Alibaba is blocking automated access. " +
+          "Set NODE_ENV=development and headless=false to enable manual captcha solving."
+        );
+      }
     }
 
     console.log("✅ Page loaded successfully");
@@ -202,8 +649,15 @@ export async function scrapeWithBrowser(
 
     throw error;
   } finally {
-    await browser.close();
-    console.log("🔒 Browser closed");
+    // Close the page, but keep the browser instance alive for reuse
+    if (page) {
+      try {
+        await page.close();
+        console.log("📄 Page closed (browser instance kept alive for reuse)");
+      } catch (error) {
+        console.warn("⚠️  Error closing page:", error);
+      }
+    }
   }
 }
 
@@ -231,10 +685,23 @@ export async function scrapeFromUrlWithBrowser(
       return product;
     } catch (error) {
       lastError = error as Error;
+      const errorMessage = error instanceof Error ? error.message : String(error);
       console.error(
         `❌ Attempt ${attempt} failed:`,
-        error instanceof Error ? error.message : error
+        errorMessage
       );
+
+      // Don't retry on certain errors (like browser not found)
+      if (
+        errorMessage.includes("Browser was not found") ||
+        errorMessage.includes("executablePath") ||
+        errorMessage.includes("ENOENT")
+      ) {
+        // If it's a browser path issue, throw immediately with a helpful message
+        throw new Error(
+          `Browser executable not found. Please ensure Chrome/Chromium is installed or remove PUPPETEER_EXECUTABLE_PATH to use bundled Chromium. Original error: ${errorMessage}`
+        );
+      }
 
       if (attempt === retries) {
         break;

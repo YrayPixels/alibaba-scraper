@@ -10,6 +10,7 @@ import {
   closeCache,
   isCacheAvailable,
 } from "./cache.js";
+import { cleanupBrowser } from "./services/browser-manager.js";
 
 dotenv.config();
 
@@ -224,12 +225,14 @@ process.on("uncaughtException", (error) => {
 // Graceful shutdown
 process.on("SIGTERM", async () => {
   console.log("🛑 SIGTERM received, shutting down gracefully...");
+  await cleanupBrowser();
   await closeCache();
   process.exit(0);
 });
 
 process.on("SIGINT", async () => {
   console.log("🛑 SIGINT received, shutting down gracefully...");
+  await cleanupBrowser();
   await closeCache();
   process.exit(0);
 });

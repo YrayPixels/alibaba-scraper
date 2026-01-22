@@ -66,8 +66,12 @@ EXPOSE 3001
 ENV NODE_ENV=production
 ENV PORT=3001
 ENV PUPPETEER_HEADLESS=true
-# Puppeteer will use bundled Chromium by default, but can use system Chromium if PUPPETEER_EXECUTABLE_PATH is set
-# Uncomment the line below to use system Chromium instead of bundled version
+# IMPORTANT: Do NOT set PUPPETEER_EXECUTABLE_PATH here
+# Puppeteer will use its bundled Chromium by default (recommended for Railway)
+# If you set PUPPETEER_EXECUTABLE_PATH in Railway's environment variables,
+# make sure Chrome/Chromium is actually installed at that path, otherwise
+# the code will automatically fall back to bundled Chromium
+# To use system Chrome, install it first and uncomment the line below:
 # ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 # Start the application
