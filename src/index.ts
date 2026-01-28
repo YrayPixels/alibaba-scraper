@@ -2,7 +2,7 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import { scrapeFromUrl } from "./scrapers/alibaba-scraper.js";
-import { scrapeFromUrlWithBrowser } from "./scrapers/browser-scraper.js";
+import { scrapeFromUrlWithBrowser, scrapeCheckoutFromUrlWithBrowser } from "./scrapers/browser-scraper.js";
 import {
   initializeCache,
   getCachedProduct,
@@ -106,6 +106,52 @@ app.post("/scrape", async (req, res) => {
       });
     }
 
+    // Check if this is a checkout page
+    // Check for various checkout page patterns
+    const isCheckoutPage = url.includes("cashier.alibaba.com") || 
+                          url.includes("payment/checkout") ||
+                          url.includes("/checkout.htm") ||
+                          url.includes("checkout.htm");
+
+    // Log which type of page was detected
+    if (isCheckoutPage) {
+      console.log(`🛒 Detected CHECKOUT page: ${url}`);
+    } else {
+      console.log(`📦 Detected PRODUCT page: ${url}`);
+    }
+
+    // Handle checkout pages
+    if (isCheckoutPage) {
+      console.log(
+        `🛒 Scraping checkout page with ${useBrowser ? "browser" : "fetch"} method${forceRefresh ? " (force refresh)" : ""}`
+      );
+
+      if (!useBrowser) {
+        return res.status(400).json({
+          error: "Checkout pages require browser scraping. Please set useBrowser=true",
+        });
+      }
+
+      try {
+        const checkout = await scrapeCheckoutFromUrlWithBrowser(url, retries);
+        
+        return res.json({
+          success: true,
+          checkout,
+          cached: false,
+        });
+      } catch (error) {
+        console.error("Checkout scraping error:", error);
+        const errorMessage =
+          error instanceof Error ? error.message : "Unknown error";
+        return res.status(500).json({
+          error: "Failed to scrape checkout page.",
+          details: errorMessage,
+        });
+      }
+    }
+
+    // Handle product pages
     // Check cache first (unless forceRefresh is true)
     if (!forceRefresh && isCacheAvailable()) {
       const cachedProduct = await getCachedProduct(url);

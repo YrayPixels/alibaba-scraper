@@ -1,7 +1,10 @@
 import { AlibabaScraper, AlibabaProduct } from "./alibaba-scraper.js";
-import type { HTTPRequest, ConsoleMessage } from "puppeteer";
+import { CheckoutScraper, AlibabaCheckout } from "./checkout-scraper.js";
+import type { HTTPRequest, ConsoleMessage, Browser } from "puppeteer";
 import { createCaptchaSolver } from "../services/captcha-solver.js";
 import { getBrowserManager } from "../services/browser-manager.js";
+import puppeteerExtra from "puppeteer-extra";
+import StealthPlugin from "puppeteer-extra-plugin-stealth";
 
 /**
  * Configuration for browser scraping
@@ -18,7 +21,7 @@ interface BrowserConfig {
 
 const DEFAULT_CONFIG: BrowserConfig = {
   // Default to non-headless in development, headless in production
-  headless: process.env.NODE_ENV === "production" 
+  headless: process.env.NODE_ENV === "production"
     ? process.env.PUPPETEER_HEADLESS !== "false"
     : process.env.PUPPETEER_HEADLESS === "true",
   timeout: 45000, // 45 seconds
@@ -34,17 +37,17 @@ const DEFAULT_CONFIG: BrowserConfig = {
  */
 function normalizeUrl(url: string): string {
   if (!url) return url;
-  
+
   // If URL already has protocol, return as-is
   if (url.match(/^https?:\/\//i)) {
     return url;
   }
-  
+
   // If URL starts with //, add https:
   if (url.startsWith("//")) {
     return "https:" + url;
   }
-  
+
   // Otherwise, add https://
   return "https://" + url;
 }
@@ -99,14 +102,14 @@ export async function scrapeWithBrowser(
     await page.setUserAgent(
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     );
-    
+
     // Enhanced fingerprinting overrides
     await page.evaluateOnNewDocument(() => {
       // Override webdriver property
       Object.defineProperty(navigator, "webdriver", {
         get: () => false,
       });
-      
+
       // Override plugins to look more realistic
       Object.defineProperty(navigator, "plugins", {
         get: () => {
@@ -136,12 +139,12 @@ export async function scrapeWithBrowser(
           ];
         },
       });
-      
+
       // Override languages
       Object.defineProperty(navigator, "languages", {
         get: () => ["en-US", "en"],
       });
-      
+
       // Override permissions
       const originalQuery = window.navigator.permissions.query;
       window.navigator.permissions.query = (parameters: any) => (
@@ -149,12 +152,12 @@ export async function scrapeWithBrowser(
           Promise.resolve({ state: Notification.permission } as PermissionStatus) :
           originalQuery(parameters)
       );
-      
+
       // Override chrome object
       (window as any).chrome = {
         runtime: {},
-        loadTimes: function() {},
-        csi: function() {},
+        loadTimes: function () { },
+        csi: function () { },
         app: {}
       };
     });
@@ -177,7 +180,7 @@ export async function scrapeWithBrowser(
     page.on("request", (request: HTTPRequest) => {
       const resourceType = request.resourceType();
       const url = request.url();
-      
+
       // Always allow: document (HTML), script (JS), xhr (API calls), fetch (API calls), stylesheet (CSS)
       // Block: images, fonts, media (we extract image URLs from HTML instead)
       // Note: We allow CSS to prevent page crashes from missing styles
@@ -188,11 +191,11 @@ export async function scrapeWithBrowser(
         request.continue();
       }
     });
-    
+
     console.log("⚡ Resource blocking enabled: Images, fonts, and media blocked (URLs extracted from HTML, CSS allowed for stability)");
 
     console.log("📄 Navigating to Alibaba product page...");
-    
+
     // Add a small delay to simulate human behavior
     await new Promise((resolve) => setTimeout(resolve, 1000 + Math.random() * 2000));
 
@@ -200,7 +203,7 @@ export async function scrapeWithBrowser(
     page.on("console", (msg: ConsoleMessage) => {
       const type = msg.type();
       const text = msg.text();
-      
+
       // Filter out common Alibaba tracking/analytics errors that don't affect content
       const ignorePatterns = [
         "__name is not defined",
@@ -225,9 +228,9 @@ export async function scrapeWithBrowser(
         "insights.alibaba.com", // Analytics failures
         "video.alibaba.com", // Video service failures
       ];
-      
+
       const shouldIgnore = ignorePatterns.some(pattern => text.includes(pattern));
-      
+
       if (!shouldIgnore) {
         if (type === "error") {
           console.error(`🌐 Browser console error: ${text}`);
@@ -240,9 +243,9 @@ export async function scrapeWithBrowser(
     page.on("pageerror", (error: unknown) => {
       const errorMsg = error instanceof Error ? error.message : String(error);
       // Filter out common non-critical errors
-      if (!errorMsg.includes("__name is not defined") && 
-          !errorMsg.includes("MIME type") &&
-          !errorMsg.includes("indexedDB")) {
+      if (!errorMsg.includes("__name is not defined") &&
+        !errorMsg.includes("MIME type") &&
+        !errorMsg.includes("indexedDB")) {
         console.error(`🌐 Page error: ${errorMsg}`);
       }
     });
@@ -268,9 +271,9 @@ export async function scrapeWithBrowser(
         "getEnvironment.do", // Environment checks (not needed)
         "gatewayService", // Gateway services (not needed)
       ];
-      
+
       const shouldIgnore = ignorePatterns.some(pattern => url.includes(pattern));
-      
+
       if (!shouldIgnore) {
         console.error(`🌐 Request failed: ${url} - ${request.failure()?.errorText}`);
       }
@@ -284,25 +287,25 @@ export async function scrapeWithBrowser(
         waitUntil: "domcontentloaded", // Wait for DOM to be ready (faster, works even if resources fail)
         timeout: finalConfig.timeout,
       });
-      
+
       console.log(`✅ Navigation response status: ${response?.status()}`);
       console.log(`📍 Current URL: ${page.url()}`);
       const initialTitle = await page.title();
       console.log(`📄 Page title: ${initialTitle}`);
-      
+
       if (!response || !response.ok()) {
         console.warn(`⚠️  Response not OK: ${response?.status()} ${response?.statusText()}`);
       }
-      
+
       // Wait for JavaScript to execute and render content
       // Since we're using domcontentloaded (faster), we need to wait a bit for JS to run
       console.log("⏳ Waiting for JavaScript to render content...");
       await new Promise((resolve) => setTimeout(resolve, 3000)); // Wait 3 seconds for JS execution
-      
+
       // Wait for page to start loading content before checking for captcha
       // Don't check immediately - page might be empty while JavaScript loads
       console.log("⏳ Waiting for page content to load...");
-      
+
       // Try to wait for any content to appear (with longer timeout for Alibaba's heavy JS)
       try {
         await page.waitForFunction(
@@ -319,7 +322,7 @@ export async function scrapeWithBrowser(
       } catch (error) {
         console.warn("⚠️  Timeout waiting for page content, continuing anyway...");
       }
-      
+
       // Additional wait for JavaScript to execute and render
       console.log("⏳ Waiting for JavaScript to render content...");
       await new Promise((resolve) => setTimeout(resolve, 5000)); // Increased wait time
@@ -327,32 +330,32 @@ export async function scrapeWithBrowser(
       console.error(`❌ Navigation error:`, error);
       throw error;
     }
-    
+
     // Check if page actually loaded content
     const bodyText = await page.evaluate(() => document.body?.innerText || "");
     console.log(`📝 Page body text length: ${bodyText.length} characters`);
-    
+
     // Check for captcha now that we've waited for content
     // Verify page is still connected
     if (page.isClosed() || !browser.isConnected()) {
       throw new Error("Page or browser disconnected before captcha check");
     }
-    
+
     let captchaCheck: any;
     try {
       captchaCheck = await page.evaluate(() => {
-      const bodyText = document.body?.innerText?.toLowerCase() || "";
-      const html = document.documentElement.innerHTML.toLowerCase();
-      return {
-        hasCaptchaText: bodyText.includes("captcha") || html.includes("captcha") || 
-                        bodyText.includes("verify you are human") || html.includes("verify you are human") ||
-                        bodyText.includes("security check") || html.includes("security check") ||
-                        bodyText.includes("unusual traffic") || html.includes("unusual traffic"),
-        hasRecaptcha: document.querySelector("iframe[src*='recaptcha']") !== null ||
-                     document.querySelector(".g-recaptcha") !== null ||
-                     document.querySelector("[id*='captcha']") !== null,
-        bodyLength: bodyText.length,
-      };
+        const bodyText = document.body?.innerText?.toLowerCase() || "";
+        const html = document.documentElement.innerHTML.toLowerCase();
+        return {
+          hasCaptchaText: bodyText.includes("captcha") || html.includes("captcha") ||
+            bodyText.includes("verify you are human") || html.includes("verify you are human") ||
+            bodyText.includes("security check") || html.includes("security check") ||
+            bodyText.includes("unusual traffic") || html.includes("unusual traffic"),
+          hasRecaptcha: document.querySelector("iframe[src*='recaptcha']") !== null ||
+            document.querySelector(".g-recaptcha") !== null ||
+            document.querySelector("[id*='captcha']") !== null,
+          bodyLength: bodyText.length,
+        };
       });
     } catch (error: any) {
       if (error.message?.includes("detached") || error.message?.includes("closed")) {
@@ -360,13 +363,13 @@ export async function scrapeWithBrowser(
       }
       throw error;
     }
-    
+
     if (captchaCheck.hasCaptchaText || captchaCheck.hasRecaptcha) {
       console.error("🚫 CAPTCHA DETECTED!");
       console.error(`   Body text length: ${captchaCheck.bodyLength}`);
       console.error(`   Has captcha text: ${captchaCheck.hasCaptchaText}`);
       console.error(`   Has recaptcha element: ${captchaCheck.hasRecaptcha}`);
-      
+
       // Try automatic captcha solving first (if configured)
       const captchaSolver = createCaptchaSolver();
       if (captchaSolver) {
@@ -376,7 +379,7 @@ export async function scrapeWithBrowser(
           // Note: Standard services may not support Alibaba's custom captcha
           // You may need a specialized service or manual solving
           const solveResult = await captchaSolver.solveSliderCaptcha(url);
-          
+
           if (solveResult.success && solveResult.token) {
             console.log("✅ Captcha solved automatically! Injecting token...");
             // Inject the token into the page
@@ -392,16 +395,16 @@ export async function scrapeWithBrowser(
                 tokenInput.dispatchEvent(event);
               }
             }, solveResult.token);
-            
+
             // Wait for page to process
             await new Promise((resolve) => setTimeout(resolve, 3000));
-            
+
             // Re-check if captcha is gone
             const recheck = await page.evaluate(() => {
               const bodyText = document.body?.innerText?.toLowerCase() || "";
               return !bodyText.includes("unusual traffic") && !bodyText.includes("verify");
             });
-            
+
             if (recheck) {
               console.log("✅ Captcha solved successfully! Continuing...");
               // Continue with scraping
@@ -418,42 +421,42 @@ export async function scrapeWithBrowser(
           // Fall through to manual solving or error
         }
       }
-      
+
       // If automatic solving didn't work or isn't configured, try manual solving
       // If in development mode and browser is visible, wait for manual captcha solving
       if (!finalConfig.headless && process.env.NODE_ENV === "development") {
         console.log("⏸️  MANUAL CAPTCHA MODE: Browser is visible - please solve the captcha manually");
         console.log("⏸️  Waiting up to 120 seconds for you to solve the captcha...");
         console.log("⏸️  The scraper will continue automatically once the captcha is solved and page loads");
-        
+
         // Wait for captcha to be solved (check if page content changes)
         const maxWaitTime = 120000; // 2 minutes
         const checkInterval = 2000; // Check every 2 seconds
         const startTime = Date.now();
-        
+
         while (Date.now() - startTime < maxWaitTime) {
           await new Promise((resolve) => setTimeout(resolve, checkInterval));
-          
+
           // Check if captcha is gone and content has loaded
           const currentCheck = await page.evaluate(() => {
             const bodyText = document.body?.innerText?.toLowerCase() || "";
             const html = document.documentElement.innerHTML.toLowerCase();
             return {
-              stillHasCaptcha: bodyText.includes("unusual traffic") || 
-                              bodyText.includes("verify") ||
-                              html.includes("unusual traffic"),
+              stillHasCaptcha: bodyText.includes("unusual traffic") ||
+                bodyText.includes("verify") ||
+                html.includes("unusual traffic"),
               hasContent: bodyText.length > 200, // Meaningful content loaded
             };
           });
-          
+
           if (!currentCheck.stillHasCaptcha && currentCheck.hasContent) {
             console.log("✅ Captcha appears to be solved! Continuing...");
             // Wait a bit more for page to fully load
-    await new Promise((resolve) => setTimeout(resolve, 3000));
+            await new Promise((resolve) => setTimeout(resolve, 3000));
             break;
           }
         }
-        
+
         // Final check
         const finalCheck = await page.evaluate(() => {
           const bodyText = document.body?.innerText?.toLowerCase() || "";
@@ -462,13 +465,13 @@ export async function scrapeWithBrowser(
             bodyLength: bodyText.length,
           };
         });
-        
+
         if (finalCheck.stillHasCaptcha) {
           throw new Error(
             "Captcha was not solved within the timeout period. Please try again."
           );
         }
-        
+
         console.log("✅ Continuing after captcha was solved");
       } else {
         throw new Error(
@@ -477,17 +480,17 @@ export async function scrapeWithBrowser(
         );
       }
     }
-    
+
     if (bodyText.length < 100) {
       console.warn("⚠️  Page seems to have very little content, might be blocked or still loading");
       // Wait a bit more for dynamic content
       console.log("⏳ Waiting additional time for dynamic content...");
       await new Promise((resolve) => setTimeout(resolve, 5000));
-      
+
       // Re-check body length
       const newBodyText = await page.evaluate(() => document.body?.innerText || "");
       console.log(`📝 Page body text length after wait: ${newBodyText.length} characters`);
-      
+
       if (newBodyText.length < 100) {
         console.warn("⚠️  Page still has very little content after waiting");
       }
@@ -497,13 +500,13 @@ export async function scrapeWithBrowser(
     console.log("🖱️  Simulating human behavior...");
     await page.mouse.move(Math.random() * 500 + 100, Math.random() * 500 + 100);
     await new Promise((resolve) => setTimeout(resolve, 500));
-    
+
     // Scroll down slowly like a human
     await page.evaluate(() => {
       window.scrollBy(0, 300);
     });
     await new Promise((resolve) => setTimeout(resolve, 1000));
-    
+
     await page.evaluate(() => {
       window.scrollBy(0, 300);
     });
@@ -519,7 +522,7 @@ export async function scrapeWithBrowser(
       ".product-name",
       "title",
     ];
-    
+
     let foundSelector = false;
     for (const selector of selectors) {
       try {
@@ -533,7 +536,7 @@ export async function scrapeWithBrowser(
         // Continue to next selector
       }
     }
-    
+
     if (!foundSelector) {
       console.warn("⚠️  Could not find any expected selectors, checking page content...");
     }
@@ -547,12 +550,12 @@ export async function scrapeWithBrowser(
     console.log(`🔍 Final page state:`);
     console.log(`   URL: ${finalUrl}`);
     console.log(`   Title: ${finalTitle}`);
-    
+
     // Final check if we hit a captcha or access denied page (more accurate detection)
     const pageContent = (await page.content()).toLowerCase();
     const pageTitle = finalTitle.toLowerCase();
     const pageUrl = finalUrl.toLowerCase();
-    
+
     // Check for actual captcha indicators (case-insensitive)
     const captchaIndicators = [
       "captcha",
@@ -565,14 +568,14 @@ export async function scrapeWithBrowser(
       "please complete the security check",
       "challenge",
     ];
-    
+
     const hasCaptcha = captchaIndicators.some(
       (indicator) =>
         pageContent.includes(indicator) ||
         pageTitle.includes(indicator) ||
         pageUrl.includes(indicator)
     );
-    
+
     // Also check for common captcha elements
     const captchaElements = await page.evaluate(() => {
       return (
@@ -585,7 +588,7 @@ export async function scrapeWithBrowser(
         document.querySelector("iframe[src*='challenge']") !== null
       );
     });
-    
+
     if (hasCaptcha || captchaElements) {
       console.error("🚫 CAPTCHA DETECTED on final check!");
       console.error(`   Page URL: ${finalUrl}`);
@@ -593,37 +596,37 @@ export async function scrapeWithBrowser(
       console.error(`   Body text length: ${bodyText.length}`);
       console.error(`   Has captcha text: ${hasCaptcha}`);
       console.error(`   Has captcha elements: ${captchaElements}`);
-      
+
       // If in development mode and browser is visible, wait for manual captcha solving
       if (!finalConfig.headless && process.env.NODE_ENV === "development") {
         console.log("⏸️  MANUAL CAPTCHA MODE: Browser is visible - please solve the captcha manually");
         console.log("⏸️  Waiting up to 120 seconds for you to solve the captcha...");
-        
+
         const maxWaitTime = 120000; // 2 minutes
         const checkInterval = 2000; // Check every 2 seconds
         const startTime = Date.now();
-        
+
         while (Date.now() - startTime < maxWaitTime) {
           await new Promise((resolve) => setTimeout(resolve, checkInterval));
-          
+
           const currentCheck = await page.evaluate(() => {
             const bodyText = document.body?.innerText?.toLowerCase() || "";
             const html = document.documentElement.innerHTML.toLowerCase();
             return {
-              stillHasCaptcha: bodyText.includes("unusual traffic") || 
-                              bodyText.includes("verify") ||
-                              html.includes("unusual traffic"),
+              stillHasCaptcha: bodyText.includes("unusual traffic") ||
+                bodyText.includes("verify") ||
+                html.includes("unusual traffic"),
               hasContent: bodyText.length > 200,
             };
           });
-          
+
           if (!currentCheck.stillHasCaptcha && currentCheck.hasContent) {
             console.log("✅ Captcha appears to be solved! Continuing...");
             await new Promise((resolve) => setTimeout(resolve, 3000));
             break;
           }
         }
-        
+
         const finalCheck = await page.evaluate(() => {
           const bodyText = document.body?.innerText?.toLowerCase() || "";
           return {
@@ -631,13 +634,13 @@ export async function scrapeWithBrowser(
             bodyLength: bodyText.length,
           };
         });
-        
+
         if (finalCheck.stillHasCaptcha) {
           throw new Error(
             "Captcha was not solved within the timeout period. Please try again."
           );
         }
-        
+
         console.log("✅ Continuing after captcha was solved");
       } else {
         throw new Error(
@@ -698,6 +701,217 @@ export async function scrapeWithBrowser(
 }
 
 /**
+ * Scrape checkout page from URL with retry logic
+ */
+export async function scrapeCheckoutFromUrlWithBrowser(
+  url: string,
+  retries: number = 2
+): Promise<AlibabaCheckout> {
+  let lastError: Error | null = null;
+
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      console.log(`🔄 Checkout scraping attempt ${attempt} of ${retries}`);
+
+      // Add delay between retries
+      if (attempt > 1) {
+        const delay = 3000 * attempt;
+        console.log(`⏳ Waiting ${delay / 1000}s before retry...`);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+
+      const checkout = await scrapeCheckoutWithBrowser(url);
+      return checkout;
+    } catch (error) {
+      lastError = error as Error;
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error(
+        `❌ Checkout scraping attempt ${attempt} failed:`,
+        errorMessage
+      );
+
+      if (attempt === retries) {
+        break;
+      }
+    }
+  }
+
+  throw new Error(
+    `Failed to scrape checkout after ${retries} attempts. Last error: ${lastError?.message || "Unknown error"
+    }`
+  );
+}
+
+/**
+ * Scrape checkout page using Puppeteer (real browser)
+ * Creates a direct connection without proxy for checkout pages
+ */
+async function scrapeCheckoutWithBrowser(
+  url: string
+): Promise<AlibabaCheckout> {
+  // Normalize URL (add protocol if missing)
+  url = normalizeUrl(url);
+
+  console.log(`🌐 Scraping checkout: ${url}`);
+  console.log(`🌐 Loading directly without proxy (checkout pages)`);
+
+  // Create a browser instance without proxy for checkout pages
+  // Always run checkout pages in visible mode so user can see the payment summary
+  const headlessMode = false; // Always show browser for checkout pages
+
+  // Create a fresh puppeteer instance with stealth plugin but without proxy
+  // @ts-ignore - puppeteer-extra types don't properly expose the use method
+  const checkoutPuppeteer = puppeteerExtra.use(StealthPlugin());
+
+  let browser: Browser;
+  try {
+    // Launch browser without proxy configuration (direct connection)
+    const args = [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+    ];
+
+    console.log(`🚀 Launching browser for checkout (no proxy, direct connection, visible mode)`);
+    console.log(`👁️  Browser will be visible so you can see the payment summary load`);
+    browser = await checkoutPuppeteer.launch({
+      headless: false, // Always visible for checkout pages
+      args,
+    });
+  } catch (error) {
+    console.error("❌ Failed to launch browser instance:", error);
+    throw error;
+  }
+
+  let page;
+
+  try {
+    page = await browser.newPage();
+
+    // Don't use proxy for checkout pages - load directly
+    console.log("🌐 Loading checkout page directly (no proxy)");
+
+    // Set realistic viewport
+    await page.setViewport({ width: 1920, height: 1080 });
+
+    // Set realistic user agent
+    await page.setUserAgent(
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    );
+
+    // Set extra headers
+    await page.setExtraHTTPHeaders({
+      "Accept-Language": "en-US,en;q=0.9",
+      Accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+      "Accept-Encoding": "gzip, deflate, br",
+      DNT: "1",
+      Connection: "keep-alive",
+      "Upgrade-Insecure-Requests": "1",
+    });
+
+    // Allow all resources to load (images, CSS, fonts, media) for checkout pages
+    // This ensures the page renders correctly and we can extract all information
+    console.log("📦 Allowing all resources to load (images, CSS, fonts, media)");
+
+    console.log("📄 Navigating to Alibaba checkout page...");
+
+    // Navigate to the page - wait for network to be idle to ensure all resources load
+    const response = await page.goto(url, {
+      waitUntil: "networkidle2", // Wait for network to be idle (all resources loaded)
+      timeout: 60000, // Increased timeout to allow all resources to load
+    });
+
+    console.log(`✅ Navigation response status: ${response?.status()}`);
+
+    // Wait for JavaScript to execute and page to fully render
+    console.log("⏳ Waiting for JavaScript to render content and resources to load...");
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+
+    // Wait for payment summary section to load (this is critical - fees are added here)
+    console.log("⏳ Waiting for payment summary section to load...");
+    try {
+      // Wait for the payment summary container to appear
+      await page.waitForSelector('.checkoutV4-summary-ui-wrapper-container, [class*="payment-summary"]', {
+        timeout: 30000,
+      });
+      console.log("✅ Payment summary container found");
+
+      // Wait for fees to be loaded (indicated by 'fee-loaded' class)
+      await page.waitForFunction(
+        () => {
+          const summaryContainer = document.querySelector('.checkoutV4-summary-ui-wrapper-container');
+          if (!summaryContainer) return false;
+
+          // Check if fee-loaded class exists
+          const feeLoaded = summaryContainer.querySelector('.fee-loaded');
+          if (!feeLoaded) return false;
+
+          // Check if the final total amount is visible (the one with processing fee)
+          const totalElement = summaryContainer.querySelector('.summary-detail.primary .value');
+          if (!totalElement) return false;
+
+          const totalText = totalElement.textContent || '';
+          // Check if it contains a currency and amount (final total should be higher than subtotal)
+          return /USD|EUR|GBP|CNY|NGN|GHS/.test(totalText) && /\d+/.test(totalText);
+        },
+        { timeout: 30000 }
+      );
+      console.log("✅ Payment processing fees loaded");
+
+      // Wait a bit more for any final calculations and to let user see the page
+      console.log("⏳ Waiting 3 seconds for final calculations (browser visible for inspection)...");
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+    } catch (error) {
+      console.warn("⚠️  Payment summary section wait timeout, continuing anyway...");
+      // Continue even if timeout - we'll try to extract what we can
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+
+    // Get the full HTML
+    const html = await page.content();
+
+    // Use checkout scraper to parse the HTML
+    const checkoutScraper = new CheckoutScraper(html);
+    const checkout = checkoutScraper.scrape();
+    checkout.checkoutUrl = url;
+
+    // Validate that we got basic checkout info
+    if (!checkout.items || checkout.items.length === 0) {
+      throw new Error(
+        "Failed to extract checkout information. The page structure may have changed."
+      );
+    }
+
+    console.log(`✅ Successfully scraped checkout: ${checkout.itemCount} items, ${checkout.currency} ${checkout.subtotal}`);
+
+    return checkout;
+  } catch (error) {
+    console.error("❌ Browser checkout scraping error:", error);
+    throw error;
+  } finally {
+    if (page) {
+      try {
+        await page.close();
+        console.log("📄 Page closed");
+      } catch (error) {
+        console.warn("⚠️  Error closing page:", error);
+      }
+    }
+    // Close the browser instance for checkout pages (we create a new one each time)
+    if (browser) {
+      try {
+        await browser.close();
+        console.log("🔒 Browser closed (checkout page browser)");
+      } catch (error) {
+        console.warn("⚠️  Error closing browser:", error);
+      }
+    }
+  }
+}
+
+/**
  * Scrape from URL with retry logic
  */
 export async function scrapeFromUrlWithBrowser(
@@ -746,8 +960,7 @@ export async function scrapeFromUrlWithBrowser(
   }
 
   throw new Error(
-    `Failed to scrape product after ${retries} attempts. Last error: ${
-      lastError?.message || "Unknown error"
+    `Failed to scrape product after ${retries} attempts. Last error: ${lastError?.message || "Unknown error"
     }`
   );
 }
