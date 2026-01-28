@@ -756,8 +756,10 @@ async function scrapeCheckoutWithBrowser(
   console.log(`🌐 Loading directly without proxy (checkout pages)`);
 
   // Create a browser instance without proxy for checkout pages
-  // Always run checkout pages in visible mode so user can see the payment summary
-  const headlessMode = false; // Always show browser for checkout pages
+  // Show browser only in development, hide in production
+  const headlessMode = process.env.NODE_ENV === "production"
+    ? process.env.PUPPETEER_HEADLESS !== "false"
+    : process.env.PUPPETEER_HEADLESS === "true";
 
   // Create a fresh puppeteer instance with stealth plugin but without proxy
   // @ts-ignore - puppeteer-extra types don't properly expose the use method
@@ -773,10 +775,13 @@ async function scrapeCheckoutWithBrowser(
       "--disable-gpu",
     ];
 
-    console.log(`🚀 Launching browser for checkout (no proxy, direct connection, visible mode)`);
-    console.log(`👁️  Browser will be visible so you can see the payment summary load`);
+    const headlessStatus = headlessMode ? "headless" : "visible";
+    console.log(`🚀 Launching browser for checkout (no proxy, direct connection, ${headlessStatus} mode)`);
+    if (!headlessMode) {
+      console.log(`👁️  Browser will be visible so you can see the payment summary load`);
+    }
     browser = await checkoutPuppeteer.launch({
-      headless: false, // Always visible for checkout pages
+      headless: headlessMode ? "new" : false,
       args,
     });
   } catch (error) {
