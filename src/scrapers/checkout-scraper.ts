@@ -1,7 +1,16 @@
 import * as cheerio from 'cheerio';
 
 /**
- * Interface for checkout order item
+ * Interface for payment breakdown details
+ */
+export interface PaymentBreakdown {
+    orderAmount: number; // Order amount before fees
+    processingFee: number; // Payment processing fee
+    total: number; // Final total (orderAmount + processingFee)
+}
+
+/**
+ * Interface for checkout order item (single item representing the entire order)
  */
 export interface CheckoutOrderItem {
     title: string;
@@ -17,10 +26,11 @@ export interface CheckoutOrderItem {
  */
 export interface AlibabaCheckout {
     orderNumber: string | null;
-    subtotal: number | null;
+    subtotal: number | null; // Final total amount
     currency: string;
-    items: CheckoutOrderItem[];
-    itemCount: number;
+    paymentBreakdown?: PaymentBreakdown; // Payment details breakdown
+    items: CheckoutOrderItem[]; // Single item representing the order
+    itemCount: number; // Number of products in the order
     checkoutUrl: string | null;
     paymentMethods?: string[];
 }
@@ -91,11 +101,30 @@ export class CheckoutScraper {
         const $ = this.$;
         const bodyText = $('body').text();
 
-        // Look for currency symbols or codes
-        if (bodyText.includes('USD') || bodyText.includes('US$') || bodyText.includes('$')) {
-            return 'USD';
-        } else if (bodyText.includes('EUR') || bodyText.includes('€')) {
+        // Look for currency symbols or codes in payment summary
+        const paymentSummary = $('.checkoutV4-summary-ui-wrapper-container, .checkoutV4-summary-ui-wrapper');
+        if (paymentSummary.length > 0) {
+            const summaryText = paymentSummary.text();
+            if (summaryText.includes('EUR') || summaryText.includes('€')) {
+                return 'EUR';
+            } else if (summaryText.includes('USD') || summaryText.includes('US$') || summaryText.includes('$')) {
+                return 'USD';
+            } else if (summaryText.includes('GBP') || summaryText.includes('£')) {
+                return 'GBP';
+            } else if (summaryText.includes('CNY') || summaryText.includes('¥')) {
+                return 'CNY';
+            } else if (summaryText.includes('NGN') || summaryText.includes('₦')) {
+                return 'NGN';
+            } else if (summaryText.includes('GHS') || summaryText.includes('GH₵')) {
+                return 'GHS';
+            }
+        }
+
+        // Look in body text as fallback
+        if (bodyText.includes('EUR') || bodyText.includes('€')) {
             return 'EUR';
+        } else if (bodyText.includes('USD') || bodyText.includes('US$') || bodyText.includes('$')) {
+            return 'USD';
         } else if (bodyText.includes('GBP') || bodyText.includes('£')) {
             return 'GBP';
         } else if (bodyText.includes('CNY') || bodyText.includes('¥')) {
@@ -106,31 +135,133 @@ export class CheckoutScraper {
             return 'GHS';
         }
 
-        // Default to USD
-        return 'USD';
+        // Default to EUR (as per user requirement)
+        return 'EUR';
     }
 
     /**
-     * Extract subtotal/total amount
+     * Extract payment breakdown from payment summary section
+     */
+    private extractPaymentBreakdown(currency: string): PaymentBreakdown | null {
+        const $ = this.$;
+
+        // Look for payment summary container
+        const paymentSummary = $('.checkoutV4-summary-ui-wrapper-container, .checkoutV4-summary-ui-wrapper');
+
+        if (paymentSummary.length === 0) {
+            return null;
+        }
+
+        let orderAmount: number | null = null;
+        let processingFee: number | null = null;
+        let total: number | null = null;
+
+        // Extract order amount (first summary-detail that's not primary)
+        const orderAmountRow = paymentSummary.find('.summary-detail:not(.primary):not(.overlap)').first();
+        if (orderAmountRow.length > 0) {
+            const orderAmountText = orderAmountRow.find('.value').text().trim();
+            const orderMatch = orderAmountText.match(/(?:USD|EUR|GBP|CNY|NGN|GHS)[\s]*([\d,]+(?:\.\d+)?)/i) ||
+                orderAmountText.match(/[\$€£¥₦][\s]*([\d,]+(?:\.\d+)?)/);
+            if (orderMatch && orderMatch[1]) {
+                orderAmount = parseFloat(orderMatch[1].replace(/,/g, ''));
+            }
+        }
+
+        // Extract payment processing fee
+        const processingFeeRow = paymentSummary.find('.summary-detail:not(.primary):not(.overlap)').eq(1);
+        if (processingFeeRow.length > 0) {
+            const feeText = processingFeeRow.find('.value').text().trim();
+            const feeMatch = feeText.match(/(?:USD|EUR|GBP|CNY|NGN|GHS)[\s]*([\d,]+(?:\.\d+)?)/i) ||
+                feeText.match(/[\$€£¥₦][\s]*([\d,]+(?:\.\d+)?)/);
+            if (feeMatch && feeMatch[1]) {
+                processingFee = parseFloat(feeMatch[1].replace(/,/g, ''));
+            }
+        }
+
+        // Extract total amount (from .summary-detail.primary or .summary-detail.overlap.primary)
+        const totalRow = paymentSummary.find('.summary-detail.primary .value, .summary-detail.overlap.primary .value, #cashier-currency-parent .value');
+        if (totalRow.length > 0) {
+            const totalText = totalRow.text().trim();
+            const totalMatch = totalText.match(/(?:USD|EUR|GBP|CNY|NGN|GHS)[\s]*([\d,]+(?:\.\d+)?)/i) ||
+                totalText.match(/[\$€£¥₦][\s]*([\d,]+(?:\.\d+)?)/);
+            if (totalMatch && totalMatch[1]) {
+                total = parseFloat(totalMatch[1].replace(/,/g, ''));
+            }
+        }
+
+        // If we have all three values, return breakdown
+        if (orderAmount !== null && processingFee !== null && total !== null) {
+            return {
+                orderAmount,
+                processingFee,
+                total,
+            };
+        }
+
+        // If we only have total, try to calculate from what we have
+        if (total !== null) {
+            if (orderAmount !== null && processingFee !== null) {
+                return {
+                    orderAmount,
+                    processingFee,
+                    total,
+                };
+            }
+            // If we have total but not breakdown, estimate
+            if (orderAmount !== null) {
+                processingFee = total - orderAmount;
+                if (processingFee > 0) {
+                    return {
+                        orderAmount,
+                        processingFee,
+                        total,
+                    };
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Extract subtotal/total amount (final total including fees)
      */
     private extractSubtotal(currency: string): number | null {
         const $ = this.$;
 
-        // Look for "Subtotal:" followed by amount
-        const bodyText = $('body').text();
+        // First try to get from payment breakdown
+        const breakdown = this.extractPaymentBreakdown(currency);
+        if (breakdown && breakdown.total) {
+            return breakdown.total;
+        }
 
-        // Pattern: "Subtotal: USD 979.00" or "Subtotal: $979.00" or "Subtotal: 979.00"
-        // Also try "Payment summary" section
-        const subtotalPatterns = [
-            new RegExp(`Subtotal[\\s:]*${currency}[\\s]*([\\d,]+(?:\\.[\\d]+)?)`, 'i'),
-            new RegExp(`Subtotal[\\s:]*[\\$€£¥₦]?[\\s]*([\\d,]+(?:\\.[\\d]+)?)`, 'i'),
+        // Fallback to previous logic
+        const paymentSummary = $('.checkoutV4-summary-ui-wrapper-container, .checkoutV4-summary-ui-wrapper');
+
+        if (paymentSummary.length > 0) {
+            // Look for the final total amount (usually in .summary-detail.primary)
+            const totalRow = paymentSummary.find('.summary-detail.primary .value, .summary-detail.overlap.primary .value, #cashier-currency-parent .value');
+            if (totalRow.length > 0) {
+                const totalText = totalRow.text().trim();
+                const totalMatch = totalText.match(/(?:USD|EUR|GBP|CNY|NGN|GHS)[\s]*([\d,]+(?:\.\d+)?)/i) ||
+                    totalText.match(/[\$€£¥₦][\s]*([\d,]+(?:\.\d+)?)/);
+                if (totalMatch && totalMatch[1]) {
+                    const amount = parseFloat(totalMatch[1].replace(/,/g, ''));
+                    if (!isNaN(amount) && amount > 0) {
+                        return amount;
+                    }
+                }
+            }
+        }
+
+        // Last resort: look in body text
+        const bodyText = $('body').text();
+        const totalPatterns = [
             new RegExp(`Total[\\s:]*${currency}[\\s]*([\\d,]+(?:\\.[\\d]+)?)`, 'i'),
-            new RegExp(`Total[\\s:]*[\\$€£¥₦]?[\\s]*([\\d,]+(?:\\.[\\d]+)?)`, 'i'),
-            new RegExp(`Payment[\\s]+summary[\\s]*[\\s\\S]{0,200}?${currency}[\\s]*([\\d,]+(?:\\.[\\d]+)?)`, 'i'),
-            new RegExp(`Payment[\\s]+summary[\\s]*[\\s\\S]{0,200}?[\\$€£¥₦]?[\\s]*([\\d,]+(?:\\.[\\d]+)?)`, 'i'),
+            new RegExp(`Pay[\\s]+in[\\s]+${currency}[\\s]*([\\d,]+(?:\\.[\\d]+)?)`, 'i'),
         ];
 
-        for (const pattern of subtotalPatterns) {
+        for (const pattern of totalPatterns) {
             const match = bodyText.match(pattern);
             if (match && match[1]) {
                 const amount = parseFloat(match[1].replace(/,/g, ''));
@@ -140,97 +271,46 @@ export class CheckoutScraper {
             }
         }
 
-        // Try to find in specific elements - look for payment summary section first
-        // The payment summary section contains the final total with processing fees
-        const paymentSummarySelectors = [
-            '.checkoutV4-summary-ui-wrapper-container',
-            '[class*="payment-summary"]',
-            '.checkout-v4-payment-summary',
-        ];
+        return null;
+    }
 
-        // First, try to get the final total from payment summary (includes processing fees)
-        for (const selector of paymentSummarySelectors) {
-            const summaryContainer = $(selector);
-            if (summaryContainer.length > 0) {
-                // Look for the final total amount (usually in .summary-detail.primary)
-                const finalTotalElement = summaryContainer.find('.summary-detail.primary .value, .summary-detail.overlap.primary .value');
-                if (finalTotalElement.length > 0) {
-                    const totalText = finalTotalElement.text().trim();
-                    // Extract amount from text like "USD 1,008.28"
-                    const totalMatch = totalText.match(/(?:USD|EUR|GBP|CNY|NGN|GHS)[\s]*([\d,]+(?:\.\d+)?)/i) ||
-                        totalText.match(/[\$€£¥₦][\s]*([\d,]+(?:\.\d+)?)/);
-                    if (totalMatch && totalMatch[1]) {
-                        const amount = parseFloat(totalMatch[1].replace(/,/g, ''));
-                        if (!isNaN(amount) && amount > 0) {
-                            // This is the final total including processing fees
-                            return amount;
-                        }
-                    }
-                }
+    /**
+     * Extract product image URL from the specific structure
+     * <div class="product-img"><img src="..." /></div>
+     */
+    private extractProductImage(): string | null {
+        const $ = this.$;
 
-                // Also try to find "Pay in" total (this is the final amount with fees)
-                const payInElement = summaryContainer.find('[id="cashier-currency-parent"] .value, .currency-list-wrapper-ui + .value');
-                if (payInElement.length > 0) {
-                    const payInText = payInElement.text().trim();
-                    const payInMatch = payInText.match(/(?:USD|EUR|GBP|CNY|NGN|GHS)[\s]*([\d,]+(?:\.\d+)?)/i) ||
-                        payInText.match(/[\$€£¥₦][\s]*([\d,]+(?:\.\d+)?)/);
-                    if (payInMatch && payInMatch[1]) {
-                        const amount = parseFloat(payInMatch[1].replace(/,/g, ''));
-                        if (!isNaN(amount) && amount > 0) {
-                            // This is the final total including processing fees
-                            return amount;
-                        }
-                    }
-                }
+        // First, try the specific structure: .product-img img
+        const productImg = $('.product-img img').first();
+        if (productImg.length > 0) {
+            const src = productImg.attr('src') || productImg.attr('data-src') || productImg.attr('data-lazy-src');
+            if (src) {
+                // Remove size parameters from URL if present (e.g., _100x100.jpg)
+                const cleanSrc = src.replace(/_\d+x\d+\.jpg/, '.jpg');
+                return cleanSrc;
             }
         }
 
-        // Fallback to other selectors
-        const subtotalSelectors = [
-            '[class*="order-summary"]',
-            '[class*="subtotal"]',
-            '[class*="total"]',
-            '[data-testid*="subtotal"]',
-            '[data-testid*="total"]',
-            '[class*="summary"]',
+        // Fallback: look for product image in other locations
+        const imageSelectors = [
+            '[class*="product-image"] img',
+            '[class*="order-image"] img',
+            '[class*="item-image"] img',
+            '[class*="product-thumb"] img',
+            '.checkout-item img',
+            '.order-product img',
         ];
 
-        for (const selector of subtotalSelectors) {
-            const elements = $(selector);
-            for (let i = 0; i < elements.length; i++) {
-                const text = $(elements[i]).text().trim();
-                // Look for currency followed by number (most common format)
-                const patterns = [
-                    new RegExp(`${currency}[\\s]*([\\d,]+(?:\\.[\\d]+)?)`, 'i'),
-                    new RegExp(`[\\$€£¥₦][\\s]*([\\d,]+(?:\\.[\\d]+)?)`, 'i'),
-                    new RegExp(`([\\d,]+(?:\\.[\\d]+)?)[\\s]*${currency}`, 'i'),
-                ];
-
-                for (const pattern of patterns) {
-                    const match = text.match(pattern);
-                    if (match && match[1]) {
-                        const amount = parseFloat(match[1].replace(/,/g, ''));
-                        if (!isNaN(amount) && amount > 0 && amount < 10000000) {
-                            return amount;
-                        }
-                    }
+        for (const selector of imageSelectors) {
+            const img = $(selector).first();
+            if (img.length > 0) {
+                const src = img.attr('src') || img.attr('data-src') || img.attr('data-lazy-src');
+                if (src && (src.includes('alicdn') || src.startsWith('http'))) {
+                    // Remove size parameters from URL if present
+                    const cleanSrc = src.replace(/_\d+x\d+\.jpg/, '.jpg');
+                    return cleanSrc;
                 }
-            }
-        }
-
-        // Last resort: look for any large number that could be a total
-        // This is less reliable but might catch edge cases
-        const allNumbers = bodyText.match(/(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)/g);
-        if (allNumbers) {
-            // Filter for reasonable totals (between 1 and 10,000,000)
-            const candidates = allNumbers
-                .map(n => parseFloat(n.replace(/,/g, '')))
-                .filter(n => !isNaN(n) && n >= 1 && n < 10000000)
-                .sort((a, b) => b - a); // Sort descending
-
-            // Return the largest reasonable number (likely the total)
-            if (candidates.length > 0) {
-                return candidates[0];
             }
         }
 
@@ -238,143 +318,57 @@ export class CheckoutScraper {
     }
 
     /**
-     * Extract order items
+     * Extract order items - returns a single item representing the entire order
+     * Note: This is ONE item, not multiple items, even if there are "10 product(s)"
      */
     private extractItems(currency: string): CheckoutOrderItem[] {
         const $ = this.$;
-        const items: CheckoutOrderItem[] = [];
 
-        // Look for product/item containers
-        const itemSelectors = [
-            '[class*="product-item"]',
-            '[class*="order-item"]',
-            '[class*="cart-item"]',
-            '[data-testid*="product"]',
-            '[data-testid*="item"]',
-            '.order-product',
-            '.checkout-item',
+        // Get item count from text like "10 product(s)" - this is just for display, not for splitting
+        const itemCountMatch = $('.product-img-mask span, [data-i18n-key*="product.img_fold_tiltle"]').text().match(/(\d+)\s*product\(s\)/i);
+        const itemCount = itemCountMatch ? parseInt(itemCountMatch[1]) : 1;
+
+        // Extract product image from .product-img img
+        const imageUrl = this.extractProductImage();
+
+        // Extract order title/description
+        let title = "Alibaba Order";
+        const titleSelectors = [
+            '[class*="order-title"]',
+            '[class*="product-title"]',
+            '[class*="order-name"]',
+            'h1', 'h2', 'h3',
         ];
 
-        // Try to find item count first
-        const bodyText = $('body').text();
-        const itemCountMatch = bodyText.match(/(\d+)\s*product\(s\)/i);
-        const expectedItemCount = itemCountMatch ? parseInt(itemCountMatch[1]) : null;
-
-        // Look for items in various structures
-        for (const selector of itemSelectors) {
-            const elements = $(selector);
-
-            if (elements.length > 0) {
-                elements.each((_, el) => {
-                    const $item = $(el);
-
-                    // Extract title
-                    const titleSelectors = [
-                        '[class*="title"]',
-                        '[class*="name"]',
-                        'h3', 'h4', 'h5',
-                        'a[href*="product"]',
-                    ];
-
-                    let title: string | null = null;
-                    for (const titleSel of titleSelectors) {
-                        const titleEl = $item.find(titleSel).first();
-                        if (titleEl.length > 0) {
-                            title = titleEl.text().trim() || titleEl.attr('title') || null;
-                            if (title && title.length > 3) break;
-                        }
-                    }
-
-                    // Extract quantity
-                    let quantity = 1;
-                    const qtyText = $item.text();
-                    const qtyMatch = qtyText.match(/Qty[:\s]*(\d+)/i) || qtyText.match(/Quantity[:\s]*(\d+)/i);
-                    if (qtyMatch) {
-                        quantity = parseInt(qtyMatch[1]);
-                    }
-
-                    // Extract price
-                    let price: number | null = null;
-                    const priceText = $item.text();
-                    const pricePatterns = [
-                        new RegExp(`${currency}[\\s]*([\\d,]+(?:\\.[\\d]+)?)`, 'i'),
-                        new RegExp(`[\\$€£¥₦][\\s]*([\\d,]+(?:\\.[\\d]+)?)`, 'i'),
-                    ];
-
-                    for (const pattern of pricePatterns) {
-                        const match = priceText.match(pattern);
-                        if (match) {
-                            price = parseFloat(match[1].replace(/,/g, ''));
-                            if (!isNaN(price) && price > 0) break;
-                        }
-                    }
-
-                    // Extract image
-                    let imageUrl: string | null = null;
-                    const img = $item.find('img').first();
-                    if (img.length > 0) {
-                        imageUrl = img.attr('src') || img.attr('data-src') || img.attr('data-lazy') || null;
-                        if (imageUrl && imageUrl.startsWith('//')) {
-                            imageUrl = 'https:' + imageUrl;
-                        }
-                    }
-
-                    // Extract SKU if available
-                    let sku: string | null = null;
-                    const skuText = $item.text();
-                    const skuMatch = skuText.match(/SKU[:\s]*([A-Z0-9-]+)/i);
-                    if (skuMatch) {
-                        sku = skuMatch[1];
-                    }
-
-                    if (title && price !== null) {
-                        items.push({
-                            title,
-                            quantity,
-                            price,
-                            currency,
-                            imageUrl,
-                            sku,
-                        });
-                    }
-                });
-
-                if (items.length > 0) break;
-            }
-        }
-
-        // If we found expected item count but fewer items, try alternative extraction
-        if (expectedItemCount && items.length < expectedItemCount) {
-            // Try to extract from text patterns
-            // This is a fallback for when items are listed in text format
-            const itemTextPattern = new RegExp(
-                `([^\\n]{10,100})\\s*(?:Qty[:\s]*)?(\\d+)?\\s*(?:${currency}[\\s]*)?([\\d,]+(?:\\.[\\d]+)?)`,
-                'gi'
-            );
-
-            let match;
-            while ((match = itemTextPattern.exec(bodyText)) !== null && items.length < expectedItemCount) {
-                const title = match[1].trim();
-                const qty = match[2] ? parseInt(match[2]) : 1;
-                const price = parseFloat(match[3].replace(/,/g, ''));
-
-                if (title.length > 3 && !isNaN(price) && price > 0) {
-                    // Check if we already have this item
-                    if (!items.some(item => item.title === title)) {
-                        items.push({
-                            title,
-                            quantity: qty,
-                            price,
-                            currency,
-                            imageUrl: null,
-                            sku: null,
-                        });
-                    }
+        for (const selector of titleSelectors) {
+            const titleEl = $(selector).first();
+            if (titleEl.length > 0) {
+                const titleText = titleEl.text().trim();
+                if (titleText && titleText.length > 3 && !titleText.includes('Order No')) {
+                    title = titleText;
+                    break;
                 }
             }
         }
 
-        return items;
+        // If no specific title found, use a generic one with item count
+        if (title === "Alibaba Order" && itemCount > 1) {
+            title = `Alibaba Order (${itemCount} products)`;
+        }
+
+        // Get order amount from payment breakdown (this is the order amount before fees)
+        const breakdown = this.extractPaymentBreakdown(currency);
+        const orderAmount = breakdown?.orderAmount || 0;
+
+        // Return SINGLE item representing the entire order
+        // This is ONE item, not split into multiple items
+        return [{
+            title: title,
+            quantity: 1, // Always 1 - this represents the entire order as one item
+            price: orderAmount > 0 ? orderAmount : 0,
+            currency: currency,
+            imageUrl: imageUrl,
+        }];
     }
 
     /**
@@ -415,15 +409,22 @@ export class CheckoutScraper {
         const currency = this.extractCurrency();
         const orderNumber = this.extractOrderNumber();
         const subtotal = this.extractSubtotal(currency);
+        const paymentBreakdown = this.extractPaymentBreakdown(currency);
         const items = this.extractItems(currency);
         const paymentMethods = this.extractPaymentMethods();
+
+        // Get item count from the "10 product(s)" text - this is the number of products in the order
+        // But we treat it as ONE item in our system
+        const itemCountMatch = this.$('.product-img-mask span, [data-i18n-key*="product.img_fold_tiltle"]').text().match(/(\d+)\s*product\(s\)/i);
+        const itemCount = itemCountMatch ? parseInt(itemCountMatch[1]) : 1;
 
         return {
             orderNumber,
             subtotal,
             currency,
+            paymentBreakdown: paymentBreakdown || undefined,
             items,
-            itemCount: items.length,
+            itemCount: itemCount,
             checkoutUrl: null, // Will be set externally
             paymentMethods: paymentMethods.length > 0 ? paymentMethods : undefined,
         };

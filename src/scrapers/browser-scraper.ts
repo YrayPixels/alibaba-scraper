@@ -800,7 +800,8 @@ async function scrapeCheckoutWithBrowser(
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     );
 
-    // Set extra headers
+    // Set extra headers - removed "Upgrade-Insecure-Requests" to avoid CORS preflight issues
+    // This header causes CORS errors that block React and other critical scripts from loading
     await page.setExtraHTTPHeaders({
       "Accept-Language": "en-US,en;q=0.9",
       Accept:
@@ -808,7 +809,7 @@ async function scrapeCheckoutWithBrowser(
       "Accept-Encoding": "gzip, deflate, br",
       DNT: "1",
       Connection: "keep-alive",
-      "Upgrade-Insecure-Requests": "1",
+      // Removed "Upgrade-Insecure-Requests" - it causes CORS preflight failures
     });
 
     // Allow all resources to load (images, CSS, fonts, media) for checkout pages
@@ -826,47 +827,200 @@ async function scrapeCheckoutWithBrowser(
     console.log(`✅ Navigation response status: ${response?.status()}`);
 
     // Wait for JavaScript to execute and page to fully render
-    console.log("⏳ Waiting for JavaScript to render content and resources to load...");
-    await new Promise((resolve) => setTimeout(resolve, 3000));
+    console.log("⏳ Waiting for JavaScript to execute and render content...");
 
-    // Wait for payment summary section to load (this is critical - fees are added here)
+    // Wait for React to load (critical for the checkout page - React16 error suggests it's not loading)
+    // console.log("⏳ Waiting for React to load (checking for React/ReactDOM)...");
+    // try {
+    //   await page.waitForFunction(
+    //     () => {
+    //       // Check if React is loaded (React16, React, or window.React)
+    //       return typeof (window as any).React !== 'undefined' ||
+    //         typeof (window as any).React16 !== 'undefined' ||
+    //         typeof (window as any).ReactDOM !== 'undefined' ||
+    //         // Fallback: check if app has meaningful content
+    //         (document.querySelector('#app')?.innerHTML.length || 0) > 1000;
+    //     },
+    //     { timeout: 20000 }
+    //   );
+    //   console.log("✅ React/ReactDOM detected");
+    // } catch (error) {
+    //   console.warn("⚠️  React load check timeout, but continuing (may still work)...");
+    // }
+
+    // Additional wait for React app to mount and render components
+    // console.log("⏳ Waiting for React app to mount and render components...");
+    // await new Promise((resolve) => setTimeout(resolve, 5000));
+
+    // Wait for payment summary section to load (this is critical - fees are added here via JavaScript)
     console.log("⏳ Waiting for payment summary section to load...");
     try {
       // Wait for the payment summary container to appear
-      await page.waitForSelector('.checkoutV4-summary-ui-wrapper-container, [class*="payment-summary"]', {
+      // Also wait for React to have rendered the component
+      console.log("⏳ Waiting for React to render payment summary...");
+      await page.waitForSelector('.checkoutV4-summary-ui-wrapper-container, [class*="payment-summary"], .payment-summary-wrapper', {
         timeout: 30000,
       });
       console.log("✅ Payment summary container found");
 
-      // Wait for fees to be loaded (indicated by 'fee-loaded' class)
+      // Wait for the container to have actual rendered content (not just empty React component)
       await page.waitForFunction(
         () => {
-          const summaryContainer = document.querySelector('.checkoutV4-summary-ui-wrapper-container');
+          const container = document.querySelector('.checkoutV4-summary-ui-wrapper-container, .payment-summary-wrapper');
+          if (!container) return false;
+          // Check if it has meaningful content (more than just empty divs)
+          const text = container.textContent || '';
+          return text.length > 100 && (text.includes('Order') || text.includes('Subtotal') || text.includes('Payment'));
+        },
+        { timeout: 15000 }
+      );
+      console.log("✅ Payment summary has rendered content");
+
+      // Wait for JavaScript to update the payment summary with fees
+      // We need to wait for the DOM to be updated by JavaScript, not just for elements to exist
+      console.log("⏳ Waiting for JavaScript to calculate and update payment processing fees...");
+
+      // Wait for the payment summary to be populated with actual content (not just empty)
+      await page.waitForFunction(
+        () => {
+          const summaryContainer = document.querySelector('.checkoutV4-summary-ui-wrapper-container, .payment-summary-wrapper');
           if (!summaryContainer) return false;
 
-          // Check if fee-loaded class exists
+          // Check if there's actual content (not just empty divs)
+          const hasContent = summaryContainer.textContent && summaryContainer.textContent.trim().length > 50;
+          if (!hasContent) return false;
+
+          return true;
+        },
+        { timeout: 10000 }
+      );
+      console.log("✅ Payment summary has content");
+
+      // Wait for the "Pay now" button to be visible (indicates page is interactive)
+      console.log("⏳ Waiting for 'Pay now' button to appear...");
+      await page.waitForSelector('.pay-button-ui, .checkout-v4-btn-primary, button[class*="pay"]', {
+        timeout: 30000,
+        visible: true,
+      });
+      console.log("✅ Pay now button found");
+
+      // Now wait for the fees to actually be calculated and displayed
+      // This is the critical part - we need to wait for JS to update the prices
+      // The page uses React/JavaScript to dynamically calculate and display fees
+      console.log("⏳ Waiting for payment processing fees to be calculated and displayed...");
+
+      // First, get the initial subtotal (before fees)
+      const initialSubtotal = await page.evaluate(() => {
+        const container = document.querySelector('.checkoutV4-summary-ui-wrapper-container, .payment-summary-wrapper');
+        if (!container) return null;
+        const subtotalEl = container.querySelector('.summary-detail:not(.primary) .value, [data-i18n-key*="subTotal"] + .value');
+        if (!subtotalEl) return null;
+        const text = subtotalEl.textContent || '';
+        const match = text.match(/(\d+\.?\d*)/);
+        return match ? parseFloat(match[1].replace(/,/g, '')) : null;
+      });
+
+      if (initialSubtotal) {
+        console.log(`📊 Initial subtotal detected: ${initialSubtotal}`);
+      }
+
+      // Wait for the final total to be different from subtotal (fees added)
+      await page.waitForFunction(
+        (expectedSubtotal) => {
+          const summaryContainer = document.querySelector('.checkoutV4-summary-ui-wrapper-container, .payment-summary-wrapper');
+          if (!summaryContainer) return false;
+
+          const containerText = summaryContainer.textContent || '';
+
+          // Check if "Payment processing fee" text exists (indicates fees section loaded)
+          const hasProcessingFeeText = containerText.includes('Payment processing fee') ||
+            containerText.includes('processing fee') ||
+            containerText.includes('Transaction fee');
+
+          if (!hasProcessingFeeText) return false;
+
+          // Check if fee-loaded class exists (indicates fees calculated)
           const feeLoaded = summaryContainer.querySelector('.fee-loaded');
-          if (!feeLoaded) return false;
 
           // Check if the final total amount is visible (the one with processing fee)
-          const totalElement = summaryContainer.querySelector('.summary-detail.primary .value');
+          const totalElement = summaryContainer.querySelector('.summary-detail.primary .value, .summary-detail.overlap.primary .value, [id="cashier-currency-parent"] .value');
+
           if (!totalElement) return false;
 
           const totalText = totalElement.textContent || '';
-          // Check if it contains a currency and amount (final total should be higher than subtotal)
-          return /USD|EUR|GBP|CNY|NGN|GHS/.test(totalText) && /\d+/.test(totalText);
-        },
-        { timeout: 30000 }
-      );
-      console.log("✅ Payment processing fees loaded");
+          // Check if it contains a currency and amount
+          const hasCurrencyAndAmount = /USD|EUR|GBP|CNY|NGN|GHS/.test(totalText) && /\d+/.test(totalText);
 
-      // Wait a bit more for any final calculations and to let user see the page
-      console.log("⏳ Waiting 3 seconds for final calculations (browser visible for inspection)...");
+          if (!hasCurrencyAndAmount) return false;
+
+          // Extract final total amount
+          const totalMatch = totalText.match(/(\d+\.?\d*)/);
+          if (!totalMatch) return false;
+
+          const finalAmount = parseFloat(totalMatch[1].replace(/,/g, ''));
+
+          // If we have expected subtotal, verify final is higher (fees added)
+          if (expectedSubtotal && finalAmount <= expectedSubtotal) {
+            return false; // Fees haven't been added yet
+          }
+
+          // Also check if there's a processing fee amount visible
+          const feeElements = summaryContainer.querySelectorAll('.summary-detail .value');
+          let hasFeeAmount = false;
+          feeElements.forEach((el) => {
+            const text = el.textContent || '';
+            // Look for amounts with decimals (processing fees)
+            if (text.match(/\d+\.\d{2}/)) {
+              hasFeeAmount = true;
+            }
+          });
+
+          // Return true if we have the total, processing fee text, and final is higher than subtotal
+          return hasProcessingFeeText && (feeLoaded !== null || hasFeeAmount) && finalAmount > 0;
+        },
+        { timeout: 30000 },
+        initialSubtotal
+      );
+      console.log("✅ Payment processing fees calculated and displayed");
+
+      // Wait for network to be completely idle (no more API calls updating prices)
+      console.log("⏳ Waiting for network to be idle (no more price updates)...");
+      // Wait additional time to ensure all API calls for fees are complete
+      // JavaScript may make async calls to calculate fees, so we wait for those to complete
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+      console.log("✅ Network should be idle");
+
+      // Additional wait to ensure all JavaScript calculations are complete
+      console.log("⏳ Waiting 3 seconds for all JavaScript calculations to finalize...");
       await new Promise((resolve) => setTimeout(resolve, 3000));
+
+      // Verify the Pay now button is actually enabled (not disabled)
+      const payButtonState = await page.evaluate(() => {
+        const payButton = document.querySelector('.pay-button-ui, .checkout-v4-btn-primary, button[class*="pay"]') as HTMLButtonElement;
+        if (!payButton) return { exists: false, enabled: false, visible: false };
+        return {
+          exists: true,
+          enabled: !payButton.disabled,
+          visible: payButton.offsetParent !== null,
+          hasText: payButton.textContent && payButton.textContent.includes('Pay')
+        };
+      });
+
+      if (payButtonState.exists && payButtonState.enabled) {
+        console.log("✅ Pay now button is enabled and ready");
+      } else {
+        console.warn(`⚠️  Pay now button state:`, payButtonState);
+      }
+
+      // Final wait to let user see the page with all fees loaded
+      console.log("⏳ Browser visible for 5 seconds for inspection (payment summary should be fully loaded)...");
+      await new Promise((resolve) => setTimeout(resolve, 5000));
     } catch (error) {
       console.warn("⚠️  Payment summary section wait timeout, continuing anyway...");
+      console.warn("⚠️  Error:", error instanceof Error ? error.message : String(error));
       // Continue even if timeout - we'll try to extract what we can
-      await new Promise((resolve) => setTimeout(resolve, 2000));
+      console.log("⏳ Waiting additional 5 seconds for JavaScript to finish...");
+      await new Promise((resolve) => setTimeout(resolve, 5000));
     }
 
     // Get the full HTML
