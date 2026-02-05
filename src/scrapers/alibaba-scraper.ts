@@ -68,6 +68,9 @@ export interface AlibabaProduct {
 /**
  * Scrapes Alibaba product page HTML and extracts product details
  */
+
+
+
 export class AlibabaScraper {
   private $: cheerio.CheerioAPI;
 
@@ -428,10 +431,10 @@ export class AlibabaScraper {
         price:
           prices.length > 0
             ? {
-                min: prices[0],
-                max: prices[prices.length - 1],
-                currency,
-              }
+              min: prices[0],
+              max: prices[prices.length - 1],
+              currency,
+            }
             : null,
         priceTiers: priceTiers,
       };
@@ -530,11 +533,11 @@ export class AlibabaScraper {
     for (const selector of mainImageSelectors) {
       const element = $(selector).first();
       // Check multiple attributes for image URLs (including lazy-loading attributes)
-      const src = element.attr("src") || 
-                  element.attr("data-src") || 
-                  element.attr("data-lazy") ||
-                  element.attr("data-original") ||
-                  element.attr("data-url");
+      const src = element.attr("src") ||
+        element.attr("data-src") ||
+        element.attr("data-lazy") ||
+        element.attr("data-original") ||
+        element.attr("data-url");
       if (src) {
         mainImage = this.normalizeImageUrl(src);
         break;
@@ -573,11 +576,11 @@ export class AlibabaScraper {
     if (images.length === 0) {
       $("img").each((_, el) => {
         // Check multiple attributes for image URLs
-        const src = $(el).attr("src") || 
-                    $(el).attr("data-src") || 
-                    $(el).attr("data-lazy") ||
-                    $(el).attr("data-original") ||
-                    $(el).attr("data-url");
+        const src = $(el).attr("src") ||
+          $(el).attr("data-src") ||
+          $(el).attr("data-lazy") ||
+          $(el).attr("data-original") ||
+          $(el).attr("data-url");
         if (
           src &&
           (src.includes("alicdn.com") || src.includes("alibaba.com")) &&
@@ -993,26 +996,26 @@ export class AlibabaScraper {
     try {
       // Modern Alibaba structure: variations are in module_sku
       // Each variation has a title (h4 with data-testid="sku-list-title") and items container (div with data-testid="sku-list-item")
-      
+
       // Find the SKU module container
       const skuModule = $('[data-module-name="module_sku"], .module_sku, [data-testid="sku-layout"]');
-      
+
       // Find all variation titles (h4 elements with data-testid="sku-list-title")
       const variationTitles = skuModule.find('[data-testid="sku-list-title"]');
 
       variationTitles.each((_, titleEl) => {
         const $title = $(titleEl);
-        
+
         // Extract variation name from title
         // Title format: "Color: White" or "EUR Size" or just "Color"
         let variationName = $title.text().trim();
-        
+
         // Extract the actual variation name (before colon if present)
         const nameMatch = variationName.match(/^([^:]+)/);
         if (nameMatch) {
           variationName = nameMatch[1].trim();
         }
-        
+
         // Also try to get from span if title has nested structure
         const spanText = $title.find('span').first().text().trim();
         if (spanText && spanText.length > variationName.length) {
@@ -1035,12 +1038,12 @@ export class AlibabaScraper {
 
         // Find the items container - it's the next sibling div with data-testid="sku-list-item"
         let itemsContainer = $title.next('[data-testid="sku-list-item"]').first();
-        
+
         // If not found as next sibling, try to find in parent's next sibling
         if (itemsContainer.length === 0) {
           itemsContainer = $title.parent().next('[data-testid="sku-list-item"]').first();
         }
-        
+
         // If still not found, look for the container that follows the title
         if (itemsContainer.length === 0) {
           // Find the parent div that contains both title and items
@@ -1050,31 +1053,31 @@ export class AlibabaScraper {
 
         // Get all variation options
         const options: VariationOption[] = [];
-        
+
         if (itemsContainer.length > 0) {
           // Find all option items
           const optionElements = itemsContainer.find('[data-testid="non-last-sku-item"], [data-testid="sku-item"], [class*="sku-item"]');
 
           optionElements.each((_, item) => {
             const $item = $(item);
-            
+
             // Check if this option is selected
             const isSelected = $item.hasClass('selected') ||
-                              $item.find('.selected, [class*="selected"]').length > 0 ||
-                              $item.find('[class*="double-bordered-box"].selected').length > 0 ||
-                              $item.find('[class*="double-bordered-box"].enabled.selected').length > 0;
+              $item.find('.selected, [class*="selected"]').length > 0 ||
+              $item.find('[class*="double-bordered-box"].selected').length > 0 ||
+              $item.find('[class*="double-bordered-box"].enabled.selected').length > 0;
 
             // Try to extract image (for color variations)
             let imageUrl: string | null = null;
             const img = $item.find('img').first();
-            
+
             if (img.length > 0) {
               // Get image URL
               const src = img.attr('src') || img.attr('data-src');
               if (src) {
                 imageUrl = this.normalizeImageUrl(src);
               }
-              
+
               // Get value from alt text or title attribute
               const altText = img.attr('alt') || img.attr('title') || '';
               if (altText && altText.trim().length > 0) {
@@ -1088,12 +1091,12 @@ export class AlibabaScraper {
               // For text-based variations (sizes), get from span or div text
               // Look for text in spans or divs that are direct children
               const textElements = $item.find('> span, > div, span[class*="text"], div[class*="text"]');
-              
+
               if (textElements.length > 0) {
                 textElements.each((_, textEl) => {
                   const $textEl = $(textEl);
                   const value = $textEl.text().trim();
-                  
+
                   // Only add if it's a reasonable length and not empty
                   if (value && value.length > 0 && value.length < 100 && !value.match(/^\d+$/)) {
                     // Avoid duplicates
@@ -1134,18 +1137,18 @@ export class AlibabaScraper {
       // Fallback: Try to find variations in module_sku
       if (variations.length === 0) {
         const skuModule = $('.module_sku, [data-module-name="module_sku"]');
-        
+
         if (skuModule.length > 0) {
           // Look for variation groups
           skuModule.find('h3, h4').each((_, titleEl) => {
             const $title = $(titleEl);
             const titleText = $title.text().trim();
-            
+
             // Check if this looks like a variation title
             if (titleText.match(/^(Color|Size|Colour|EUR Size|US Size|UK Size|Style|Material)/i)) {
               const variationName = titleText.replace(/^[^:]*:\s*/, '').trim() || titleText;
               let variationType: ProductVariation['type'] = 'other';
-              
+
               const nameLower = variationName.toLowerCase();
               if (nameLower.includes('color') || nameLower.includes('colour')) {
                 variationType = 'color';
@@ -1154,7 +1157,7 @@ export class AlibabaScraper {
               }
 
               const options: VariationOption[] = [];
-              
+
               // Find options in the next sibling or parent container
               const container = $title.next('[class*="flex"], [class*="grid"], div').first();
               if (container.length === 0) {
@@ -1164,7 +1167,7 @@ export class AlibabaScraper {
 
               container.find('img, span, div[class*="box"]').each((_, optionEl) => {
                 const $option = $(optionEl);
-                
+
                 // Check for image
                 const img = $option.is('img') ? $option : $option.find('img').first();
                 if (img.length > 0) {
@@ -1254,17 +1257,17 @@ function getRandomUserAgent(): string {
  */
 function normalizeUrl(url: string): string {
   if (!url) return url;
-  
+
   // If URL already has protocol, return as-is
   if (url.match(/^https?:\/\//i)) {
     return url;
   }
-  
+
   // If URL starts with //, add https:
   if (url.startsWith("//")) {
     return "https:" + url;
   }
-  
+
   // Otherwise, add https://
   return "https://" + url;
 }
@@ -1278,7 +1281,7 @@ export async function scrapeFromUrl(
 ): Promise<AlibabaProduct> {
   // Normalize URL (add protocol if missing)
   url = normalizeUrl(url);
-  
+
   let lastError: Error | null = null;
 
   for (let attempt = 1; attempt <= retries; attempt++) {
@@ -1323,7 +1326,7 @@ export async function scrapeFromUrl(
       }
 
       const html = await response.text();
-      
+
       // Check if we got a valid HTML response
       if (!html || html.length < 100) {
         throw new Error('Received empty or invalid response from Alibaba');
