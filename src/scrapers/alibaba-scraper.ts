@@ -1051,12 +1051,32 @@ export class AlibabaScraper {
           itemsContainer = parentContainer.find('[data-testid="sku-list-item"]').first();
         }
 
+        // Additional fallback: look for the next sibling that contains sku items
+        if (itemsContainer.length === 0) {
+          let nextSibling = $title.next();
+          while (nextSibling.length > 0 && itemsContainer.length === 0) {
+            itemsContainer = nextSibling.find('[data-testid="sku-list-item"]').first();
+            if (itemsContainer.length === 0) {
+              // Check if this sibling itself is the container
+              if (nextSibling.attr('data-testid') === 'sku-list-item') {
+                itemsContainer = nextSibling;
+              } else {
+                nextSibling = nextSibling.next();
+              }
+            }
+          }
+        }
+
         // Get all variation options
         const options: VariationOption[] = [];
 
         if (itemsContainer.length > 0) {
-          // Find all option items
-          const optionElements = itemsContainer.find('[data-testid="non-last-sku-item"], [data-testid="sku-item"], [class*="sku-item"]');
+          // Find all option items - try multiple selectors to catch all variation types
+          const optionElements = itemsContainer.find('[data-testid="non-last-sku-item"], [data-testid="sku-item"], [class*="sku-item"], [data-testid="double-bordered-box"]').filter((_, el) => {
+            // Filter out parent containers, only get actual option items
+            const $el = $(el);
+            return $el.find('[data-testid="non-last-sku-item"]').length === 0;
+          });
 
           optionElements.each((_, item) => {
             const $item = $(item);
@@ -1065,7 +1085,8 @@ export class AlibabaScraper {
             const isSelected = $item.hasClass('selected') ||
               $item.find('.selected, [class*="selected"]').length > 0 ||
               $item.find('[class*="double-bordered-box"].selected').length > 0 ||
-              $item.find('[class*="double-bordered-box"].enabled.selected').length > 0;
+              $item.find('[class*="double-bordered-box"].enabled.selected').length > 0 ||
+              $item.closest('[class*="double-bordered-box"]').hasClass('selected');
 
             // Try to extract image (for color variations)
             let imageUrl: string | null = null;
@@ -1089,32 +1110,32 @@ export class AlibabaScraper {
               }
             } else {
               // For text-based variations (sizes), get from span or div text
-              // Look for text in spans or divs that are direct children
-              const textElements = $item.find('> span, > div, span[class*="text"], div[class*="text"]');
+              // Look for text in spans or divs - try multiple selectors
+              let value: string | null = null;
+              
+              // First try to find text in common span/div patterns
+              const textElements = $item.find('span, div').filter((_, el) => {
+                const $el = $(el);
+                const text = $el.text().trim();
+                // Prefer elements that have text but no child elements with text
+                return text.length > 0 && $el.children().length === 0;
+              });
 
               if (textElements.length > 0) {
-                textElements.each((_, textEl) => {
-                  const $textEl = $(textEl);
-                  const value = $textEl.text().trim();
-
-                  // Only add if it's a reasonable length and not empty
-                  if (value && value.length > 0 && value.length < 100 && !value.match(/^\d+$/)) {
-                    // Avoid duplicates
-                    if (!options.some(opt => opt.value === value)) {
-                      options.push({
-                        value: value,
-                        imageUrl: null,
-                        selected: isSelected,
-                      });
-                    }
-                  }
-                });
+                // Get the first non-empty text element
+                value = $(textElements[0]).text().trim();
               } else {
-                // Fallback: get all text from the item
-                const allText = $item.text().trim();
-                if (allText && allText.length > 0 && allText.length < 100) {
+                // Fallback: get all text from the item itself
+                value = $item.text().trim();
+              }
+
+              // Allow numeric values (sizes like "39", "40", etc.) and other text values
+              // Only exclude if it's empty, too long, or just whitespace
+              if (value && value.length > 0 && value.length < 100) {
+                // Avoid duplicates
+                if (!options.some(opt => opt.value === value)) {
                   options.push({
-                    value: allText,
+                    value: value,
                     imageUrl: null,
                     selected: isSelected,
                   });
@@ -1126,11 +1147,14 @@ export class AlibabaScraper {
 
         // If we found options, add this variation
         if (options.length > 0 && variationName && variationName.length > 0) {
+          console.log(`✅ Found variation: ${variationName} with ${options.length} options:`, options.map(o => o.value).join(', '));
           variations.push({
             name: variationName,
             type: variationType,
             options: options,
           });
+        } else {
+          console.log(`⚠️ Variation "${variationName}" found but no options extracted (itemsContainer length: ${itemsContainer.length})`);
         }
       });
 
